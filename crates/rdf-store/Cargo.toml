@@ -11,7 +11,6 @@ catalog-core = { path = "../catalog-core" }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-serde_json = { workspace = true }
 contreforts-kg = { path = "../../vendor/contreforts-kg" }
 oxigraph = { workspace = true }
 urlencoding = { workspace = true }

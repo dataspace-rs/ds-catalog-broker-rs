@@ -62,16 +62,16 @@
 //! the same `"0.5"` range, to construct `NamedNode`/`Literal`/`Term`
 //! values), not because the coupling itself is free.
 //!
-//! The quad mapping is still the "first cut" blob-JSON bridge this doc
-//! comment originally proposed, not full RDF decomposition: one named
-//! graph per origin node, one triple per graph, subject = predicate =
-//! object all handled as plain Oxigraph terms rather than a real
-//! vocabulary of dataset/offer/distribution classes. See
-//! [`oxigraph_backend`]'s module doc for the exact IRI scheme. Modeling
-//! `Catalog`/`Dataset`/`DataService` as real RDF triples remains future
-//! work, tracked the same way as before: an ADR-equivalent record in the
-//! `dataspace` study repo's `docs/adr/` when that decomposition is
-//! designed.
+//! The quad mapping has moved past the original "first cut" blob-JSON
+//! bridge (one opaque `catalogJson` literal per graph) to a real RDF
+//! decomposition: `Catalog`/`Dataset`/`Distribution`/`DataService` each
+//! become their own resource, related by real DCAT object properties, per
+//! gap analysis §3.2 (`docs/gap-analysis-2026-08-27.md`). See
+//! [`oxigraph_backend`]'s module doc for the exact subject/predicate/object
+//! mapping - the ADR-equivalent record this doc comment previously
+//! deferred to. `catalog-core::Dataset` still has no ODRL `Offer`/`Policy`
+//! field (gap analysis §3.4), so no ODRL triples are emitted yet; that
+//! remains future work; not guessed at here.
 
 use async_trait::async_trait;
 use catalog_core::{Catalog, NodeId};
@@ -301,35 +301,185 @@ pub mod memory {
 /// See this module's own doc comment above ("Implemented backend") for why
 /// `contreforts-kg` rather than raw `oxigraph`.
 ///
-/// ## Quad mapping (first cut - see the crate-level doc comment)
+/// ## Quad mapping (real RDF decomposition - gap analysis §3.2)
 ///
-/// For an origin node whose [`NodeId`] is `<node>`:
+/// Reuses [DCAT](http://www.w3.org/ns/dcat#) terms wherever a genuine DCAT
+/// property/class fits `catalog-core`'s domain model, matching the
+/// Dataspace Protocol's own stated approach ("The Catalog Protocol reuses
+/// properties from the DCAT and ODRL vocabularies" - `catalog.protocol.md`,
+/// "Introduction"). One non-DCAT/ODRL term is reused for the same reason:
+/// [Dublin Core Terms](http://purl.org/dc/terms/)' `dct:format`, which is
+/// what DCAT/DSP tooling itself actually uses for a `Distribution`'s
+/// format (including the real DSP `2025-1` JSON-LD context, which maps its
+/// `format` term to `dct:format` - confirmed against this project's own,
+/// now-removed `http-api` DSP layer, whose `DspDistribution.format` field
+/// serialized under that same context). Everything else with no DCAT/ODRL
+/// (or DCTERMS) equivalent falls back to this project's own
+/// `https://federated-catalog-rs.internal/ns#` namespace.
 ///
-/// - **Subject and named graph IRI** (the same IRI is reused for both):
-///   `https://federated-catalog-rs.internal/nodes/<percent-encoded node>`.
-///   Percent-encoding the node id guarantees a valid IRI regardless of what
-///   characters the id contains.
-/// - **Predicate**: the fixed vocabulary IRI
-///   `https://federated-catalog-rs.internal/ns#catalogJson`.
-/// - **Object**: a plain (untyped) string [`oxigraph::model::Literal`]
-///   holding the node's [`Catalog`] serialized as JSON via `serde_json`.
+/// **No ODRL terms are emitted.** `catalog-core::Dataset` has no `Offer`/
+/// `Policy` field at all today (see its own doc comment, and gap analysis
+/// §3.4) - the only DSP `Offer`/`hasPolicy` representation that ever
+/// existed in this codebase was a hardcoded placeholder in the now-removed
+/// `http-api` DSP-serving layer, not data derived from anything a crawled
+/// participant actually said. Inventing an ODRL shape here to have
+/// *something* to point `odrl:` constants at would be exactly the "guess
+/// at policy semantics" gap analysis §3.4 explicitly says not to do. What
+/// *does* exist in the domain model - `Catalog.properties` and
+/// `Dataset.properties` - is faithfully preserved as real triples (see
+/// "Generic properties" below), so if a future crawler starts stuffing
+/// policy-relevant data into those maps, it already round-trips; it is
+/// just not yet modeled as `odrl:Offer`/`odrl:Policy` resources.
 ///
-/// So each origin node's named graph holds exactly one triple: its own IRI
-/// as subject, `catalogJson` as predicate, and the whole crawled catalog as
-/// a JSON blob object. This is deliberately not a real RDF decomposition of
-/// `Catalog`/`Dataset`/`DataService` into their own triples - it is a
-/// bridge that gets a real Oxigraph store under the trait now, with actual
-/// per-dataset/per-offer RDF modeling left as future work.
+/// ### Namespaces
+///
+/// | Prefix | IRI |
+/// |---|---|
+/// | `dcat:` | `http://www.w3.org/ns/dcat#` |
+/// | `dct:` | `http://purl.org/dc/terms/` |
+/// | `rdf:` | `http://www.w3.org/1999/02/22-rdf-syntax-ns#` |
+/// | `fcns:` (fallback) | `https://federated-catalog-rs.internal/ns#` |
+///
+/// ### Resource IRIs
+///
+/// For an origin node whose [`NodeId`] is `<node>` (percent-encoded
+/// throughout, so any character the id contains still yields a valid
+/// IRI), let `<base>` = `https://federated-catalog-rs.internal/nodes/<node>`:
+///
+/// - **Named graph** (one per origin node, matching the trait's contract):
+///   `<base>`.
+/// - **Catalog resource**: `<base>/catalogs/<catalog.id>`.
+/// - **Dataset resource**: `<base>/datasets/<dataset.id>`.
+/// - **Distribution resource**: `<base>/datasets/<dataset.id>/distributions/<index>`
+///   - a distribution has no id of its own in the domain model, so it is
+///     identified by its position in `dataset.distributions` instead of a
+///     blank node (predictable, queryable IRIs beat blank nodes here, and
+///     the index doubles as the ordering key - see "Ordering" below).
+/// - **DataService resource**: `<base>/services/<data_service.id>`.
+///
+/// `Distribution.access_service` is a bare `String` in the domain model,
+/// not a typed foreign key - it is resolved to a DataService resource IRI
+/// using the exact same `<base>/services/<id>` scheme a real `DataService`
+/// would get, so a distribution whose `access_service` matches a data
+/// service actually present in the same catalog naturally points at that
+/// same resource. A dangling reference (no such service) still round-trips
+/// correctly: decoding only ever needs to strip the known prefix and
+/// percent-decode the remainder, it never requires the target to exist.
+///
+/// ### Triples emitted, subject/predicate/object
+///
+/// For catalog resource `<catalog>`:
+/// - `<catalog> rdf:type dcat:Catalog .`
+/// - `<catalog> fcns:participantId "<participant_id>"` - only if
+///   `Catalog.participant_id` is `Some`. DSP's own `participantId` is a
+///   dataspace-specific concept with no DCAT/ODRL equivalent, so it falls
+///   back to this project's own namespace per the rule above.
+/// - `<catalog> dcat:dataset <dataset> .` - one per `Catalog.datasets`
+///   entry (`dcat:dataset` is DCAT's real Catalog-to-Dataset property).
+/// - `<catalog> dcat:service <service> .` - one per `Catalog.data_services`
+///   entry (`dcat:service`, DCAT3's real Catalog-to-DataService property).
+/// - `<catalog> <property-predicate> "<value>"` - one per
+///   `Catalog.properties` entry; see "Generic properties" below.
+///
+/// For each dataset resource `<dataset>` (from `Catalog.datasets`):
+/// - `<dataset> rdf:type dcat:Dataset .`
+/// - `<dataset> fcns:sequenceIndex "<index>"^^xsd:integer .` - see
+///   "Ordering" below.
+/// - `<dataset> dcat:distribution <distribution> .` - one per
+///   `Dataset.distributions` entry (`dcat:distribution` is DCAT's real
+///   Dataset-to-Distribution property).
+/// - `<dataset> <property-predicate> "<value>"` - one per
+///   `Dataset.properties` entry; see "Generic properties" below.
+///
+/// For each distribution resource `<distribution>` (from
+/// `Dataset.distributions`):
+/// - `<distribution> rdf:type dcat:Distribution .`
+/// - `<distribution> fcns:sequenceIndex "<index>"^^xsd:integer .`
+/// - `<distribution> dct:format "<format>" .`
+/// - `<distribution> dcat:accessService <service> .` - `<service>` is the
+///   `<base>/services/<access_service>` IRI described above (`dcat:accessService`
+///   is DCAT's real Distribution-to-DataService property).
+///
+/// For each data service resource `<service>` (from `Catalog.data_services`):
+/// - `<service> rdf:type dcat:DataService .`
+/// - `<service> fcns:sequenceIndex "<index>"^^xsd:integer .`
+/// - `<service> dcat:endpointURL <endpoint_url>` (or, if `endpoint_url`
+///   does not parse as a valid IRI - untrusted crawled data, not something
+///   this store should reject - `"<endpoint_url>"` as a plain literal
+///   instead). DCAT defines `dcat:endpointURL`'s range as `rdfs:Resource`,
+///   i.e. an IRI, not a literal; since the domain field already holds a
+///   URL string, minting it as the object IRI directly (rather than
+///   wrapping it in a literal) is the more faithful reading of the real
+///   DCAT term.
+/// - `<service> dcat:endpointDescription "<endpoint_description>"` - only
+///   if `DataService.endpoint_description` is `Some`. Stored as a plain
+///   literal rather than an IRI even though DCAT's formal range for this
+///   property is also `rdfs:Resource`: this domain field holds free text
+///   (e.g. `"dataspace-protocol-http:1.0"`, see `seed_sample_catalog`), not
+///   a URL, and DCAT's own usage note allows literal values in practice.
+///
+/// ### Generic properties (`Catalog.properties` / `Dataset.properties`)
+///
+/// `catalog-core`'s `properties: BTreeMap<String, String>` is an arbitrary
+/// key/value bag - EDC's `Dataset`/`Asset` have the same shape, keyed by
+/// whatever property IRI or name the source used. Each entry becomes
+/// exactly one triple, `<resource> <predicate> "<value>"`, where
+/// `<predicate>` is:
+/// - the key itself, reused as-is, **if** it already parses as an absolute
+///   IRI (so a crawler that already normalized a key to a real vocabulary
+///   term - e.g. `http://www.w3.org/ns/dcat#keyword` - gets a genuine
+///   triple using that term, not a synthesized one); otherwise
+/// - `fcns:property/<percent-encoded key>` - the documented fallback.
+///
+/// No crawler populates `properties` today (`crawler::parse_catalog_response`
+/// leaves it `Default::default()`), so this path is exercised only by
+/// direct `CatalogCache::upsert` callers and this module's own tests - but
+/// whatever ends up in that map, including any future policy-relevant
+/// data, is faithfully represented as a triple, never silently dropped.
+///
+/// **Known limitation, not exercised by any current producer**: a
+/// property key that happens to be exactly one of this mapping's own
+/// reserved predicate IRIs (`rdf:type`, `dcat:dataset`, `dcat:service`,
+/// `dcat:distribution`, `dcat:accessService`, `dcat:endpointURL`,
+/// `dcat:endpointDescription`, `dct:format`, `fcns:participantId`,
+/// `fcns:sequenceIndex`) would collide with this mapping's own structural
+/// triples. Flagged rather than defended against, since nothing produces
+/// such a key today.
+///
+/// ### Ordering (`fcns:sequenceIndex`)
+///
+/// `Catalog.datasets`, `Dataset.distributions`, and `Catalog.data_services`
+/// are all `Vec`s - order (and, for distributions, even exact duplicates)
+/// is part of `Catalog`'s `PartialEq`, but RDF triples are an unordered
+/// set. Each dataset/distribution/data-service resource therefore carries
+/// an explicit `fcns:sequenceIndex` integer literal recording its original
+/// position, and `query()` sorts by it when reconstructing each `Vec` -
+/// this is pure bookkeeping to make an ordered domain type round-trip
+/// through an unordered store faithfully, not domain data, hence the
+/// fallback namespace rather than a borrowed vocabulary term (DCAT has no
+/// concept of dataset/distribution ordering).
+///
+/// This also implicitly assumes `Dataset.id` (and `DataService.id`) are
+/// unique within one catalog: two datasets sharing an id would collide
+/// onto the same `<base>/datasets/<id>` resource. This mirrors real DSP
+/// semantics (a JSON-LD node's `@id` is inherently unique - that is what
+/// `@id` means) and is not otherwise enforced by `catalog-core::Dataset`.
 pub mod oxigraph_backend {
     use super::*;
+    use catalog_core::{DataService, Dataset, Distribution};
     use contreforts_kg::GraphError;
     use contreforts_kg::store::GraphStore;
-    use oxigraph::model::{Literal, NamedNode, NamedOrBlankNode, Term};
+    use oxigraph::model::{Literal, NamedNode, NamedOrBlankNode, Quad, Term};
     use oxigraph::store::StorageError;
+    use std::collections::BTreeMap;
     use std::path::Path;
 
     const NODE_NS: &str = "https://federated-catalog-rs.internal/nodes/";
-    const CATALOG_JSON_PREDICATE: &str = "https://federated-catalog-rs.internal/ns#catalogJson";
+    const INTERNAL_NS: &str = "https://federated-catalog-rs.internal/ns#";
+    const INTERNAL_PROPERTY_PREFIX: &str = "https://federated-catalog-rs.internal/ns#property/";
+    const DCAT_NS: &str = "http://www.w3.org/ns/dcat#";
+    const DCT_NS: &str = "http://purl.org/dc/terms/";
+    const RDF_TYPE_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 
     impl From<GraphError> for StoreError {
         fn from(err: GraphError) -> Self {
@@ -343,18 +493,198 @@ pub mod oxigraph_backend {
         }
     }
 
-    /// The fixed `catalogJson` predicate. Constructed on demand rather than
-    /// cached in a `static` - it's cheap to build and this keeps the module
-    /// free of `lazy_static`/`OnceLock` machinery for a single constant IRI.
-    fn catalog_json_predicate() -> NamedNode {
-        NamedNode::new(CATALOG_JSON_PREDICATE).expect("constant IRI is valid")
+    // --- Fixed vocabulary terms -------------------------------------------------
+    //
+    // Constructed on demand rather than cached in a `static` - cheap to build,
+    // and keeps this module free of `lazy_static`/`OnceLock` machinery for a
+    // handful of constant IRIs, matching the style the JSON-blob version of
+    // this module used for its own single `catalogJson` predicate.
+
+    fn iri(value: impl Into<String>) -> NamedNode {
+        NamedNode::new(value).expect("constant/percent-encoded IRI is valid")
     }
 
-    /// The subject / named-graph IRI for `node`, percent-encoding the node
-    /// id so the result is always a valid IRI.
-    fn node_iri(node: &NodeId) -> StoreResult<NamedNode> {
-        let iri = format!("{NODE_NS}{}", urlencoding::encode(&node.0));
-        NamedNode::new(iri).map_err(|e| StoreError::Backend(format!("invalid node IRI: {e}")))
+    fn dcat(local: &str) -> NamedNode {
+        iri(format!("{DCAT_NS}{local}"))
+    }
+
+    fn dct(local: &str) -> NamedNode {
+        iri(format!("{DCT_NS}{local}"))
+    }
+
+    fn internal(local: &str) -> NamedNode {
+        iri(format!("{INTERNAL_NS}{local}"))
+    }
+
+    fn rdf_type() -> NamedNode {
+        iri(RDF_TYPE_IRI)
+    }
+
+    fn dcat_catalog_class() -> NamedNode {
+        dcat("Catalog")
+    }
+
+    fn dcat_dataset_class() -> NamedNode {
+        dcat("Dataset")
+    }
+
+    fn dcat_distribution_class() -> NamedNode {
+        dcat("Distribution")
+    }
+
+    fn dcat_data_service_class() -> NamedNode {
+        dcat("DataService")
+    }
+
+    fn dcat_dataset_pred() -> NamedNode {
+        dcat("dataset")
+    }
+
+    fn dcat_service_pred() -> NamedNode {
+        dcat("service")
+    }
+
+    fn dcat_distribution_pred() -> NamedNode {
+        dcat("distribution")
+    }
+
+    fn dcat_access_service_pred() -> NamedNode {
+        dcat("accessService")
+    }
+
+    fn dcat_endpoint_url_pred() -> NamedNode {
+        dcat("endpointURL")
+    }
+
+    fn dcat_endpoint_description_pred() -> NamedNode {
+        dcat("endpointDescription")
+    }
+
+    fn dct_format_pred() -> NamedNode {
+        dct("format")
+    }
+
+    fn participant_id_pred() -> NamedNode {
+        internal("participantId")
+    }
+
+    fn sequence_index_pred() -> NamedNode {
+        internal("sequenceIndex")
+    }
+
+    /// The key/value-property fallback predicate for a key that isn't
+    /// already an absolute IRI - see the module doc's "Generic properties".
+    fn property_predicate(key: &str) -> NamedNode {
+        if let Ok(existing) = NamedNode::new(key) {
+            existing
+        } else {
+            iri(format!(
+                "{INTERNAL_PROPERTY_PREFIX}{}",
+                urlencoding::encode(key)
+            ))
+        }
+    }
+
+    /// Inverse of [`property_predicate`]: recover the original property key
+    /// from a predicate IRI.
+    fn decode_property_key(pred: &NamedNode) -> String {
+        match pred.as_str().strip_prefix(INTERNAL_PROPERTY_PREFIX) {
+            Some(rest) => urlencoding::decode(rest)
+                .map(|cow| cow.into_owned())
+                .unwrap_or_else(|_| rest.to_string()),
+            None => pred.as_str().to_string(),
+        }
+    }
+
+    // --- Resource IRI construction ----------------------------------------------
+
+    /// The base IRI for `node`'s named graph, also the prefix every
+    /// resource IRI within that graph is built from. Percent-encoding the
+    /// node id guarantees a valid IRI regardless of what characters the id
+    /// contains.
+    fn node_base(node: &NodeId) -> String {
+        format!("{NODE_NS}{}", urlencoding::encode(&node.0))
+    }
+
+    /// The subject / named-graph IRI for `node`.
+    fn node_iri(node: &NodeId) -> NamedNode {
+        iri(node_base(node))
+    }
+
+    fn catalog_iri(node_base: &str, catalog_id: &str) -> NamedNode {
+        iri(format!(
+            "{node_base}/catalogs/{}",
+            urlencoding::encode(catalog_id)
+        ))
+    }
+
+    fn dataset_iri(node_base: &str, dataset_id: &str) -> NamedNode {
+        iri(format!(
+            "{node_base}/datasets/{}",
+            urlencoding::encode(dataset_id)
+        ))
+    }
+
+    fn distribution_iri(node_base: &str, dataset_id: &str, index: usize) -> NamedNode {
+        iri(format!(
+            "{node_base}/datasets/{}/distributions/{index}",
+            urlencoding::encode(dataset_id)
+        ))
+    }
+
+    fn service_iri(node_base: &str, service_id: &str) -> NamedNode {
+        iri(format!(
+            "{node_base}/services/{}",
+            urlencoding::encode(service_id)
+        ))
+    }
+
+    /// Strip `prefix` off `iri` and percent-decode the remainder - the
+    /// inverse of how every resource IRI above was built from an id.
+    fn strip_prefix_decode(iri: &str, prefix: &str) -> StoreResult<String> {
+        let rest = iri.strip_prefix(prefix).ok_or_else(|| {
+            StoreError::Backend(format!("expected IRI '{iri}' to start with '{prefix}'"))
+        })?;
+        urlencoding::decode(rest)
+            .map(|cow| cow.into_owned())
+            .map_err(|e| StoreError::Backend(format!("invalid percent-encoding in '{iri}': {e}")))
+    }
+
+    fn decode_node_id(graph_iri: &NamedNode) -> StoreResult<NodeId> {
+        strip_prefix_decode(graph_iri.as_str(), NODE_NS).map(NodeId::new)
+    }
+
+    /// `endpoint_url` as an IRI object when it parses as one (the faithful
+    /// DCAT reading of `dcat:endpointURL`'s `rdfs:Resource` range), falling
+    /// back to a plain string literal when it doesn't - defensive, since
+    /// this string comes from crawled data this store should never reject.
+    fn endpoint_url_term(endpoint_url: &str) -> Term {
+        match NamedNode::new(endpoint_url) {
+            Ok(node) => Term::from(node),
+            Err(_) => Term::from(Literal::from(endpoint_url.to_string())),
+        }
+    }
+
+    /// A literal's lexical value, or a `NamedNode`'s IRI string - covers
+    /// both shapes [`endpoint_url_term`] can produce, so loading is
+    /// agnostic to which one a given stored value took.
+    fn term_as_string(term: &Term) -> StoreResult<String> {
+        match term {
+            Term::Literal(lit) => Ok(lit.value().to_string()),
+            Term::NamedNode(node) => Ok(node.as_str().to_string()),
+            other => Err(StoreError::Backend(format!(
+                "expected a literal or IRI term, got {other:?}"
+            ))),
+        }
+    }
+
+    fn expect_named_node(term: Term, context: &str) -> StoreResult<NamedNode> {
+        match term {
+            Term::NamedNode(node) => Ok(node),
+            other => Err(StoreError::Backend(format!(
+                "expected a named node for {context}, got {other:?}"
+            ))),
+        }
     }
 
     /// A [`CatalogCache`] backed by a real `contreforts_kg::store::GraphStore`
@@ -378,66 +708,390 @@ pub mod oxigraph_backend {
             Ok(Self { store })
         }
 
-        /// Load the catalog stored in `graph_iri`'s named graph, if any.
-        fn load_graph(&self, graph_iri: &NamedNode) -> StoreResult<Option<Catalog>> {
-            let predicate = catalog_json_predicate();
-            let mut quads = self.store.inner().quads_for_pattern(
-                Some(graph_iri.into()),
-                Some((&predicate).into()),
-                None,
-                Some(graph_iri.into()),
-            );
-            let Some(quad) = quads.next() else {
-                return Ok(None);
-            };
-            let quad = quad?;
-            let json = match quad.object {
-                Term::Literal(lit) => lit.value().to_string(),
-                other => {
-                    return Err(StoreError::Backend(format!(
-                        "expected a literal catalogJson object, got {other:?}"
-                    )));
-                }
-            };
-            let catalog: Catalog = serde_json::from_str(&json)
-                .map_err(|e| StoreError::Backend(format!("failed to deserialize catalog: {e}")))?;
-            Ok(Some(catalog))
+        /// Quads matching the given pattern, always scoped to `graph` -
+        /// every read this backend does is graph-scoped, so `graph` is a
+        /// required parameter here rather than another `Option`.
+        fn quads(
+            &self,
+            subject: Option<&NamedNode>,
+            predicate: Option<&NamedNode>,
+            object: Option<&Term>,
+            graph: &NamedNode,
+        ) -> StoreResult<Vec<Quad>> {
+            self.store
+                .inner()
+                .quads_for_pattern(
+                    subject.map(|s| s.into()),
+                    predicate.map(|p| p.into()),
+                    object.map(|o| o.into()),
+                    Some(graph.into()),
+                )
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(StoreError::from)
         }
 
-        /// Whether `subject`'s named graph currently holds any quad.
-        fn has_subject(&self, subject: &NamedNode) -> StoreResult<bool> {
-            let mut quads = self.store.inner().quads_for_pattern(
-                Some(subject.into()),
-                None,
-                None,
-                Some(subject.into()),
-            );
-            match quads.next() {
-                Some(quad) => {
-                    quad?;
-                    Ok(true)
-                }
-                None => Ok(false),
+        /// The first object found for `(subject, predicate, ?, graph)`, if
+        /// any.
+        fn first_object(
+            &self,
+            subject: &NamedNode,
+            predicate: &NamedNode,
+            graph: &NamedNode,
+        ) -> StoreResult<Option<Term>> {
+            Ok(self
+                .quads(Some(subject), Some(predicate), None, graph)?
+                .into_iter()
+                .next()
+                .map(|quad| quad.object))
+        }
+
+        fn sequence_index(&self, subject: &NamedNode, graph: &NamedNode) -> StoreResult<usize> {
+            let term = self
+                .first_object(subject, &sequence_index_pred(), graph)?
+                .ok_or_else(|| {
+                    StoreError::Backend(format!("{} is missing fcns:sequenceIndex", subject.as_str()))
+                })?;
+            match term {
+                Term::Literal(lit) => lit
+                    .value()
+                    .parse::<usize>()
+                    .map_err(|e| StoreError::Backend(format!("invalid sequenceIndex: {e}"))),
+                other => Err(StoreError::Backend(format!(
+                    "sequenceIndex must be a literal, got {other:?}"
+                ))),
             }
+        }
+
+        /// Whether `graph` currently holds any quad at all.
+        fn graph_nonempty(&self, graph: &NamedNode) -> StoreResult<bool> {
+            Ok(!self.quads(None, None, None, graph)?.is_empty())
+        }
+
+        /// Remove every quad in `graph`, regardless of subject - the
+        /// "replace wholesale" half of `upsert`, and all of `delete`.
+        fn clear_named_graph(&self, graph: &NamedNode) -> StoreResult<()> {
+            self.store.inner().remove_named_graph(graph)?;
+            Ok(())
+        }
+
+        fn insert(
+            &self,
+            subject: &NamedNode,
+            predicate: &NamedNode,
+            object: &Term,
+            graph: &NamedNode,
+        ) -> StoreResult<()> {
+            self.store
+                .insert_in_named_graph(subject, predicate, object, graph)?;
+            Ok(())
+        }
+
+        /// Write every triple for `catalog` into `graph` - see this
+        /// module's own doc comment for the exact mapping.
+        fn write_catalog(&self, catalog: &Catalog, graph: &NamedNode) -> StoreResult<()> {
+            let base = node_base(&catalog.origin_node);
+            let catalog_node = catalog_iri(&base, &catalog.id);
+
+            self.insert(&catalog_node, &rdf_type(), &Term::from(dcat_catalog_class()), graph)?;
+
+            if let Some(participant_id) = &catalog.participant_id {
+                self.insert(
+                    &catalog_node,
+                    &participant_id_pred(),
+                    &Term::from(Literal::from(participant_id.clone())),
+                    graph,
+                )?;
+            }
+
+            for (key, value) in &catalog.properties {
+                self.insert(
+                    &catalog_node,
+                    &property_predicate(key),
+                    &Term::from(Literal::from(value.clone())),
+                    graph,
+                )?;
+            }
+
+            for (index, dataset) in catalog.datasets.iter().enumerate() {
+                let dataset_node = dataset_iri(&base, &dataset.id);
+                self.insert(
+                    &catalog_node,
+                    &dcat_dataset_pred(),
+                    &Term::from(dataset_node.clone()),
+                    graph,
+                )?;
+                self.insert(&dataset_node, &rdf_type(), &Term::from(dcat_dataset_class()), graph)?;
+                self.insert(
+                    &dataset_node,
+                    &sequence_index_pred(),
+                    &Term::from(Literal::from(index as i64)),
+                    graph,
+                )?;
+
+                for (key, value) in &dataset.properties {
+                    self.insert(
+                        &dataset_node,
+                        &property_predicate(key),
+                        &Term::from(Literal::from(value.clone())),
+                        graph,
+                    )?;
+                }
+
+                for (dist_index, distribution) in dataset.distributions.iter().enumerate() {
+                    let distribution_node = distribution_iri(&base, &dataset.id, dist_index);
+                    self.insert(
+                        &dataset_node,
+                        &dcat_distribution_pred(),
+                        &Term::from(distribution_node.clone()),
+                        graph,
+                    )?;
+                    self.insert(
+                        &distribution_node,
+                        &rdf_type(),
+                        &Term::from(dcat_distribution_class()),
+                        graph,
+                    )?;
+                    self.insert(
+                        &distribution_node,
+                        &sequence_index_pred(),
+                        &Term::from(Literal::from(dist_index as i64)),
+                        graph,
+                    )?;
+                    self.insert(
+                        &distribution_node,
+                        &dct_format_pred(),
+                        &Term::from(Literal::from(distribution.format.clone())),
+                        graph,
+                    )?;
+                    let access_service_node = service_iri(&base, &distribution.access_service);
+                    self.insert(
+                        &distribution_node,
+                        &dcat_access_service_pred(),
+                        &Term::from(access_service_node),
+                        graph,
+                    )?;
+                }
+            }
+
+            for (index, service) in catalog.data_services.iter().enumerate() {
+                let service_node = service_iri(&base, &service.id);
+                self.insert(
+                    &catalog_node,
+                    &dcat_service_pred(),
+                    &Term::from(service_node.clone()),
+                    graph,
+                )?;
+                self.insert(&service_node, &rdf_type(), &Term::from(dcat_data_service_class()), graph)?;
+                self.insert(
+                    &service_node,
+                    &sequence_index_pred(),
+                    &Term::from(Literal::from(index as i64)),
+                    graph,
+                )?;
+                self.insert(
+                    &service_node,
+                    &dcat_endpoint_url_pred(),
+                    &endpoint_url_term(&service.endpoint_url),
+                    graph,
+                )?;
+                if let Some(description) = &service.endpoint_description {
+                    self.insert(
+                        &service_node,
+                        &dcat_endpoint_description_pred(),
+                        &Term::from(Literal::from(description.clone())),
+                        graph,
+                    )?;
+                }
+            }
+
+            Ok(())
+        }
+
+        /// Reconstruct the [`Catalog`] stored in `graph` for `node`, if any
+        /// (`None` when the graph holds no `dcat:Catalog` resource at all -
+        /// i.e. nothing has ever been upserted for this node).
+        fn load_catalog(&self, node: &NodeId, graph: &NamedNode) -> StoreResult<Option<Catalog>> {
+            let base = node_base(node);
+            let catalog_class_term = Term::from(dcat_catalog_class());
+            let type_pred = rdf_type();
+
+            let Some(first) = self
+                .quads(None, Some(&type_pred), Some(&catalog_class_term), graph)?
+                .into_iter()
+                .next()
+            else {
+                return Ok(None);
+            };
+            let catalog_subject = match first.subject {
+                NamedOrBlankNode::NamedNode(node) => node,
+                NamedOrBlankNode::BlankNode(_) => {
+                    return Err(StoreError::Backend(
+                        "catalog subject must be a named node".to_string(),
+                    ));
+                }
+            };
+            let catalog_id = strip_prefix_decode(catalog_subject.as_str(), &format!("{base}/catalogs/"))?;
+
+            let participant_id = self
+                .first_object(&catalog_subject, &participant_id_pred(), graph)?
+                .as_ref()
+                .map(term_as_string)
+                .transpose()?;
+
+            let dataset_pred = dcat_dataset_pred();
+            let service_pred = dcat_service_pred();
+
+            let reserved_catalog_preds = [
+                type_pred.clone(),
+                participant_id_pred(),
+                dataset_pred.clone(),
+                service_pred.clone(),
+            ];
+            let mut properties = BTreeMap::new();
+            for quad in self.quads(Some(&catalog_subject), None, None, graph)? {
+                if reserved_catalog_preds.contains(&quad.predicate) {
+                    continue;
+                }
+                properties.insert(decode_property_key(&quad.predicate), term_as_string(&quad.object)?);
+            }
+
+            let mut dataset_entries = Vec::new();
+            for quad in self.quads(Some(&catalog_subject), Some(&dataset_pred), None, graph)? {
+                let dataset_subject = expect_named_node(quad.object, "a dcat:dataset reference")?;
+                dataset_entries.push(self.load_dataset(&base, &dataset_subject, graph)?);
+            }
+            dataset_entries.sort_by_key(|(index, _)| *index);
+            let datasets = dataset_entries.into_iter().map(|(_, dataset)| dataset).collect();
+
+            let mut service_entries = Vec::new();
+            for quad in self.quads(Some(&catalog_subject), Some(&service_pred), None, graph)? {
+                let service_subject = expect_named_node(quad.object, "a dcat:service reference")?;
+                service_entries.push(self.load_data_service(&base, &service_subject, graph)?);
+            }
+            service_entries.sort_by_key(|(index, _)| *index);
+            let data_services = service_entries.into_iter().map(|(_, service)| service).collect();
+
+            Ok(Some(Catalog {
+                id: catalog_id,
+                origin_node: node.clone(),
+                participant_id,
+                datasets,
+                data_services,
+                properties,
+            }))
+        }
+
+        fn load_dataset(
+            &self,
+            base: &str,
+            subject: &NamedNode,
+            graph: &NamedNode,
+        ) -> StoreResult<(usize, Dataset)> {
+            let id = strip_prefix_decode(subject.as_str(), &format!("{base}/datasets/"))?;
+            let index = self.sequence_index(subject, graph)?;
+            let distribution_pred = dcat_distribution_pred();
+
+            let mut distribution_entries = Vec::new();
+            for quad in self.quads(Some(subject), Some(&distribution_pred), None, graph)? {
+                let distribution_subject =
+                    expect_named_node(quad.object, "a dcat:distribution reference")?;
+                distribution_entries.push(self.load_distribution(base, &distribution_subject, graph)?);
+            }
+            distribution_entries.sort_by_key(|(index, _)| *index);
+            let distributions = distribution_entries
+                .into_iter()
+                .map(|(_, distribution)| distribution)
+                .collect();
+
+            let reserved = [rdf_type(), sequence_index_pred(), distribution_pred];
+            let mut properties = BTreeMap::new();
+            for quad in self.quads(Some(subject), None, None, graph)? {
+                if reserved.contains(&quad.predicate) {
+                    continue;
+                }
+                properties.insert(decode_property_key(&quad.predicate), term_as_string(&quad.object)?);
+            }
+
+            Ok((
+                index,
+                Dataset {
+                    id,
+                    properties,
+                    distributions,
+                },
+            ))
+        }
+
+        fn load_distribution(
+            &self,
+            base: &str,
+            subject: &NamedNode,
+            graph: &NamedNode,
+        ) -> StoreResult<(usize, Distribution)> {
+            let index = self.sequence_index(subject, graph)?;
+            let format = self
+                .first_object(subject, &dct_format_pred(), graph)?
+                .as_ref()
+                .map(term_as_string)
+                .transpose()?
+                .ok_or_else(|| {
+                    StoreError::Backend(format!("{} is missing dct:format", subject.as_str()))
+                })?;
+            let access_service_term = self
+                .first_object(subject, &dcat_access_service_pred(), graph)?
+                .ok_or_else(|| {
+                    StoreError::Backend(format!("{} is missing dcat:accessService", subject.as_str()))
+                })?;
+            let access_service_node =
+                expect_named_node(access_service_term, "dcat:accessService's object")?;
+            let access_service =
+                strip_prefix_decode(access_service_node.as_str(), &format!("{base}/services/"))?;
+
+            Ok((index, Distribution { format, access_service }))
+        }
+
+        fn load_data_service(
+            &self,
+            base: &str,
+            subject: &NamedNode,
+            graph: &NamedNode,
+        ) -> StoreResult<(usize, DataService)> {
+            let id = strip_prefix_decode(subject.as_str(), &format!("{base}/services/"))?;
+            let index = self.sequence_index(subject, graph)?;
+            let endpoint_url = self
+                .first_object(subject, &dcat_endpoint_url_pred(), graph)?
+                .as_ref()
+                .map(term_as_string)
+                .transpose()?
+                .ok_or_else(|| {
+                    StoreError::Backend(format!("{} is missing dcat:endpointURL", subject.as_str()))
+                })?;
+            let endpoint_description = self
+                .first_object(subject, &dcat_endpoint_description_pred(), graph)?
+                .as_ref()
+                .map(term_as_string)
+                .transpose()?;
+
+            Ok((
+                index,
+                DataService {
+                    id,
+                    endpoint_url,
+                    endpoint_description,
+                },
+            ))
         }
     }
 
     #[async_trait]
     impl CatalogCache for OxigraphCatalogCache {
         async fn upsert(&self, catalog: Catalog) -> StoreResult<()> {
-            let subject = node_iri(&catalog.origin_node)?;
-            let predicate = catalog_json_predicate();
-            let json = serde_json::to_string(&catalog)
-                .map_err(|e| StoreError::Backend(format!("failed to serialize catalog: {e}")))?;
-            let object = Term::from(Literal::from(json));
-
-            // Insert-or-replace: remove any existing triple for this
-            // subject/graph first, matching the in-memory impl's
-            // `HashMap::insert` overwrite semantics.
-            self.store
-                .remove_subject_from_named_graph(&subject, &subject)?;
-            self.store
-                .insert_in_named_graph(&subject, &predicate, &object, &subject)?;
+            let graph = node_iri(&catalog.origin_node);
+            // Insert-or-replace: clear any prior graph for this node first,
+            // matching the in-memory impl's `HashMap::insert` overwrite
+            // semantics (and EDC's upsert-by-origin-node-url behavior).
+            self.clear_named_graph(&graph)?;
+            self.write_catalog(&catalog, &graph)?;
             Ok(())
         }
 
@@ -446,8 +1100,8 @@ pub mod oxigraph_backend {
 
             match &query.origin_node {
                 Some(node) => {
-                    let subject = node_iri(node)?;
-                    if let Some(catalog) = self.load_graph(&subject)? {
+                    let graph = node_iri(node);
+                    if let Some(catalog) = self.load_catalog(node, &graph)? {
                         results.push(catalog);
                     }
                 }
@@ -462,7 +1116,8 @@ pub mod oxigraph_backend {
                             // This backend never writes blank-node graphs.
                             continue;
                         };
-                        if let Some(catalog) = self.load_graph(&graph_iri)? {
+                        let node = decode_node_id(&graph_iri)?;
+                        if let Some(catalog) = self.load_catalog(&node, &graph_iri)? {
                             results.push(catalog);
                         }
                     }
@@ -482,11 +1137,10 @@ pub mod oxigraph_backend {
         }
 
         async fn delete(&self, node: &NodeId) -> StoreResult<bool> {
-            let subject = node_iri(node)?;
-            let existed = self.has_subject(&subject)?;
+            let graph = node_iri(node);
+            let existed = self.graph_nonempty(&graph)?;
             if existed {
-                self.store
-                    .remove_subject_from_named_graph(&subject, &subject)?;
+                self.clear_named_graph(&graph)?;
             }
             Ok(existed)
         }
@@ -502,6 +1156,59 @@ pub mod oxigraph_backend {
 
         fn cache() -> OxigraphCatalogCache {
             OxigraphCatalogCache::in_memory().unwrap()
+        }
+
+        /// A catalog exercising every field the domain model has: nested
+        /// datasets with properties and distributions, a data service, a
+        /// participant id, and catalog-level properties. Used by the
+        /// round-trip and real-decomposition tests below.
+        fn rich_catalog() -> Catalog {
+            let mut catalog = Catalog::new("cat-rich", NodeId::new("node-rich"));
+            catalog.participant_id = Some("did:example:rich-participant".to_string());
+            catalog
+                .properties
+                .insert("http://www.w3.org/ns/dcat#keyword".to_string(), "logistics".to_string());
+            catalog
+                .properties
+                .insert("internalLabel".to_string(), "demo".to_string());
+
+            let mut ds1_properties = BTreeMap::new();
+            ds1_properties.insert("assetType".to_string(), "data.rest".to_string());
+            catalog.datasets.push(Dataset {
+                id: "ds-1".to_string(),
+                properties: ds1_properties,
+                distributions: vec![
+                    Distribution {
+                        format: "application/json".to_string(),
+                        access_service: "svc-1".to_string(),
+                    },
+                    Distribution {
+                        format: "application/xml".to_string(),
+                        access_service: "svc-1".to_string(),
+                    },
+                ],
+            });
+            catalog.datasets.push(Dataset {
+                id: "ds-2".to_string(),
+                properties: BTreeMap::new(),
+                distributions: vec![Distribution {
+                    format: "text/csv".to_string(),
+                    access_service: "svc-2".to_string(),
+                }],
+            });
+
+            catalog.data_services.push(DataService {
+                id: "svc-1".to_string(),
+                endpoint_url: "https://example.org/dsp".to_string(),
+                endpoint_description: Some("dataspace-protocol-http:1.0".to_string()),
+            });
+            catalog.data_services.push(DataService {
+                id: "svc-2".to_string(),
+                endpoint_url: "https://example.org/other-dsp".to_string(),
+                endpoint_description: None,
+            });
+
+            catalog
         }
 
         #[tokio::test]
@@ -594,6 +1301,139 @@ pub mod oxigraph_backend {
 
             let removed_again = cache.delete(&NodeId::new("node-1")).await.unwrap();
             assert!(!removed_again);
+        }
+
+        /// The correctness bar from gap analysis §3.2: round-tripping a
+        /// catalog that exercises every field (nested datasets, properties
+        /// with both an already-IRI key and a plain key, distributions,
+        /// data services, participant id) through real triples must
+        /// reproduce the exact same domain value, order included.
+        #[tokio::test]
+        async fn round_trips_a_catalog_exercising_every_field_exactly() {
+            let cache = cache();
+            let original = rich_catalog();
+            cache.upsert(original.clone()).await.unwrap();
+
+            let results = cache
+                .query(CatalogQuery::for_node(NodeId::new("node-rich")))
+                .await
+                .unwrap();
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0], original);
+        }
+
+        /// Proves real decomposition happened: a direct quad-pattern query
+        /// against the store, using the real `dct:format` predicate IRI,
+        /// finds a specific distribution's format. This is impossible
+        /// against the old JSON-blob representation, where the entire
+        /// catalog was one opaque literal object and no predicate other
+        /// than `fcns:catalogJson` ever existed in the store.
+        #[tokio::test]
+        async fn a_direct_quad_pattern_query_finds_a_distribution_format_by_its_real_dcat_predicate() {
+            let cache = cache();
+            cache.upsert(rich_catalog()).await.unwrap();
+
+            let graph = node_iri(&NodeId::new("node-rich"));
+            let matches = cache
+                .quads(
+                    None,
+                    Some(&dct_format_pred()),
+                    Some(&Term::from(Literal::from("application/xml".to_string()))),
+                    &graph,
+                )
+                .unwrap();
+            assert_eq!(matches.len(), 1, "expected exactly one distribution with this format");
+
+            // And the subject that carries it really is a dcat:Distribution
+            // reachable from ds-1 via the real dcat:distribution property -
+            // not just a coincidentally-matching literal floating in the
+            // graph.
+            let distribution_subject = match &matches[0].subject {
+                NamedOrBlankNode::NamedNode(n) => n.clone(),
+                other => panic!("expected a named node subject, got {other:?}"),
+            };
+            let type_matches = cache
+                .quads(
+                    Some(&distribution_subject),
+                    Some(&rdf_type()),
+                    Some(&Term::from(dcat_distribution_class())),
+                    &graph,
+                )
+                .unwrap();
+            assert_eq!(type_matches.len(), 1);
+        }
+
+        /// Same proof as above, but via a real SPARQL ASK through
+        /// `contreforts_kg::QueryEngine` (the "SPARQL ASK" option gap
+        /// analysis §3.2 calls out), scoped to one named graph.
+        #[tokio::test]
+        async fn sparql_ask_finds_a_dataset_via_the_real_dcat_dataset_link() {
+            let cache = cache();
+            cache.upsert(rich_catalog()).await.unwrap();
+
+            let engine = contreforts_kg::QueryEngine::new(&cache.store);
+            let found = engine
+                .ask(&format!(
+                    "PREFIX dcat: <{DCAT_NS}> ASK {{ GRAPH <{}> {{ \
+                         ?catalog a dcat:Catalog ; dcat:dataset ?dataset . \
+                         ?dataset a dcat:Dataset . \
+                         ?dataset dcat:distribution ?distribution . \
+                         ?distribution dcat:accessService ?service . \
+                         ?service a dcat:DataService \
+                     }} }}",
+                    node_iri(&NodeId::new("node-rich")).as_str()
+                ))
+                .unwrap();
+            assert!(found, "expected the real dcat:dataset/distribution/accessService chain to be queryable");
+        }
+
+        /// A property whose key is already a real vocabulary IRI is stored
+        /// under that exact predicate, not this project's fallback
+        /// namespace - proving "reuse the term when one genuinely fits"
+        /// actually happens, not just documented.
+        #[tokio::test]
+        async fn a_property_keyed_by_a_real_vocabulary_iri_is_stored_under_that_predicate() {
+            let cache = cache();
+            cache.upsert(rich_catalog()).await.unwrap();
+
+            let graph = node_iri(&NodeId::new("node-rich"));
+            let keyword_pred = iri("http://www.w3.org/ns/dcat#keyword");
+            let matches = cache.quads(None, Some(&keyword_pred), None, &graph).unwrap();
+            assert_eq!(matches.len(), 1);
+            assert_eq!(term_as_string(&matches[0].object).unwrap(), "logistics");
+        }
+
+        /// `upsert` replacing a node's graph wholesale must also drop the
+        /// old catalog's decomposed triples, not just its top-level
+        /// resource - otherwise a re-crawl with fewer datasets would leak
+        /// orphaned dataset/distribution triples forever.
+        #[tokio::test]
+        async fn upsert_wholesale_replacement_drops_the_prior_catalogs_decomposed_triples() {
+            let cache = cache();
+            cache.upsert(rich_catalog()).await.unwrap();
+
+            let mut smaller = Catalog::new("cat-smaller", NodeId::new("node-rich"));
+            smaller.datasets.push(Dataset {
+                id: "only-dataset".to_string(),
+                properties: BTreeMap::new(),
+                distributions: vec![],
+            });
+            cache.upsert(smaller.clone()).await.unwrap();
+
+            let results = cache
+                .query(CatalogQuery::for_node(NodeId::new("node-rich")))
+                .await
+                .unwrap();
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0], smaller);
+
+            // No leftover triples from `rich_catalog`'s ds-1/ds-2/svc-1/svc-2.
+            let graph = node_iri(&NodeId::new("node-rich"));
+            let all_quads = cache.quads(None, None, None, &graph).unwrap();
+            let leaked_old_dataset = all_quads.iter().any(|q| {
+                matches!(&q.subject, NamedOrBlankNode::NamedNode(n) if n.as_str().contains("ds-1") || n.as_str().contains("ds-2"))
+            });
+            assert!(!leaked_old_dataset, "old catalog's dataset triples must not survive a wholesale upsert");
         }
     }
 }
