@@ -185,16 +185,19 @@ is required, not optional, follow-up work — see the gap analysis.
 
 The sections above describe the **corrected target scope** (Catalog
 Broker role, semantic cache, dataset-list + SPARQL serving). The
-codebase does not fully match it yet — most notably, `ds-catalog-broker-rs` still
-contains a DSP catalog-serving endpoint (`POST /dsp/catalog/request`,
-`GET /dsp/catalog/datasets/{id}`, `.well-known/dspace-version`, and the
-`DspAuthMode`/`DspAuthConfig` gating system built to protect it) that
-this README used to describe as a feature and now describes as scope
-creep to be removed. **[`docs/gap-analysis-2026-08-27.md`](docs/gap-analysis-2026-08-27.md)**
-is the concrete punch list — what to remove, what to keep (the crawl
-engine and the DCP *holder* role are correctly scoped already), and
-what's genuinely missing (real RDF decomposition, the SPARQL endpoint) —
-written to lead that corrective work, not to be acted on silently.
+codebase does not fully match it yet. The DSP catalog-*serving* surface
+this README used to describe as scope creep (`POST /dsp/catalog/request`,
+`GET /dsp/catalog/datasets/{id}`, `.well-known/dspace-version`, the
+`DspAuthMode`/`DspAuthConfig` gating system, and the DCP *verifier* role
+that protected it) has since been removed, per
+**[`docs/gap-analysis-2026-08-27.md`](docs/gap-analysis-2026-08-27.md)**
+§1 — `ds-catalog-broker-rs` no longer answers `CatalogRequestMessage`s at
+all. What's genuinely missing is real work, not just deletion: real RDF
+decomposition of the semantic cache (today it's still a JSON-blob bridge,
+see below), the SPARQL endpoint, and honoring upstream ODRL policies —
+see that same document's §3 for the concrete punch list, and §2 for what
+was already correctly scoped and untouched (the crawl engine and the DCP
+*holder* role).
 
 ## Vendored dependencies
 

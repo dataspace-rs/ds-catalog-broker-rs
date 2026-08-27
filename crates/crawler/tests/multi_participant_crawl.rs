@@ -1,60 +1,66 @@
 //! Hermetic, in-process multi-participant crawl integration test.
 //!
 //! Everything here runs inside this one test binary: no real EDC/JVM
-//! process, no external network. Two real `ds-catalog-broker-rs` server
-//! instances, one hand-built mock DCP-gated provider, and one hand-built
-//! `did:web` issuer are bound to OS-assigned `127.0.0.1` ports and driven
-//! with real HTTP calls (`reqwest`) through the crawler's actual
-//! `crawler::crawl_once`:
+//! process, no external network. Two hand-built mock DSP Catalog
+//! Services, one real `ds-catalog-broker-rs` server instance (Instance H,
+//! the crawler's own DCP holder role), and one hand-built `did:web`
+//! issuer are bound to OS-assigned `127.0.0.1` ports and driven with real
+//! HTTP calls (`reqwest`) through the crawler's actual `crawler::crawl_once`:
 //!
-//! - **O ("open")**: a real `ds-catalog-broker-rs` instance,
-//!   `DspAuthMode::Disabled`, seeded (directly via the cache's own
-//!   `upsert`, not `seed_sample_catalog`) with distinct
-//!   `OPEN-01`/`OPEN-02` datasets. No auth needed.
+//! - **O ("open")**: **not** a `ds-catalog-broker-rs` instance - a small,
+//!   standalone mock DSP catalog-request endpoint built by hand in this
+//!   file (`spawn_open_participant`, a bare `axum::Router`), seeded with
+//!   distinct `OPEN-01`/`OPEN-02` datasets. No auth needed - it answers
+//!   any request unconditionally. See the module-level note below,
+//!   ["Why Instances O and P are no longer `ds-catalog-broker-rs`
+//!   instances"], for why.
 //! - **P ("provider", DCP-gated)**: **not** a `ds-catalog-broker-rs`
 //!   instance - a small, standalone mock DSP catalog-request endpoint
 //!   built by hand in this file (`spawn_mock_gated_provider`, a bare
 //!   `axum::Router`), seeded with distinct `GATED-01`/`GATED-02` datasets.
 //!   Only reachable with a valid DCP self-issued token backed by a
 //!   Verifiable Credential that grants `GATED-01` (and, deliberately,
-//!   *not* `GATED-02`). See the module-level note below,
-//!   ["Why Instance P is no longer a `ds-catalog-broker-rs` instance"],
-//!   for why.
+//!   *not* `GATED-02`).
 //! - **H ("holder")**: the crawler's own `dcp_core::HolderIdentity` -
 //!   `/dsp/holder/presentations/query` is the real, unmodified route
 //!   `ds_catalog_broker_rs::build_router` already serves; the mock
 //!   provider's own presentation-verification logic (below) calls it
 //!   exactly as a real relying party would.
 //!
-//! ## Why Instance P is no longer a `ds-catalog-broker-rs` instance
+//! ## Why Instances O and P are no longer `ds-catalog-broker-rs` instances
 //!
-//! Instance P used to be a real `ds-catalog-broker-rs` server running
-//! under `DspAuthMode::Dcp` (its DSP catalog-serving endpoint, gated by
-//! its DCP *verifier* role, `dcp::verify_dcp_bearer_token`). Per
-//! `docs/gap-analysis-2026-08-27.md` (S1), the next phase of this
-//! workflow deletes that entire surface: `POST /dsp/catalog/request`,
+//! Both O and P used to be real `ds-catalog-broker-rs` servers answering
+//! `POST /dsp/catalog/request` (P additionally gated by the product's own
+//! DCP *verifier* role, `dcp::verify_dcp_bearer_token`). Per
+//! `docs/gap-analysis-2026-08-27.md` (S1), this workflow deletes that
+//! entire DSP-serving surface: `POST /dsp/catalog/request`,
+//! `GET /dsp/catalog/datasets/{id}`, `GET /.well-known/dspace-version`,
 //! `GET /dsp/did.json`, `DspAuthMode`/`DspAuthConfig`, and
-//! `dcp::verify_dcp_bearer_token` itself - this product is a DSP
-//! *Consumer* (Catalog Broker), and must never answer
-//! `CatalogRequestMessage` as a Provider.
+//! `dcp::verify_dcp_bearer_token` itself, along with the `dcp` module
+//! entirely - this product is a DSP *Consumer* (Catalog Broker), and must
+//! never answer `CatalogRequestMessage` as a Provider, gated or not. Both
+//! O and P stand in for *some other, real* participant's Catalog Service
+//! - a role this product's own binary no longer plays at all, not even in
+//! `DspAuthMode::Disabled`'s "open" shape.
 //!
 //! Without a replacement, that deletion would silently take this test's
-//! only real coverage of the crawler's outbound DCP token-minting/holder
-//! path with it. So this test now builds its own minimal, independent
-//! mock DCP-gated Catalog Service (`spawn_mock_gated_provider`) directly
-//! out of `dcp_core`'s shared, role-agnostic JWS/`did:web` primitives -
-//! the same ones the (soon-to-be-deleted) verifier used, and the same
-//! ones `dcp_core::HolderIdentity` (staying, see below) still needs. The
-//! mock's `mock_verify_dcp_bearer_token` function below is a faithful,
-//! independent reimplementation of the same verification flow
-//! `ds_catalog_broker_rs::dcp::verify_dcp_bearer_token` implements today
-//! (resolve the caller's `did:web`, verify the signature, check
-//! `aud`/`exp`, re-package the nested token, POST it to the caller's
-//! Presentation API, verify the returned VP/VC) - not a stub that always
-//! says yes. It does not import anything from `ds_catalog_broker_rs::dcp`
-//! (that module is going away); it is built only from `dcp_core` plus a
-//! bare `axum::Router`, so it keeps working unmodified once the product's
-//! own verifier role is deleted.
+//! only real coverage of the crawler's outbound HTTP fetch (O) and DCP
+//! token-minting/holder path (P) with it. So this test builds its own
+//! minimal, independent mock DSP Catalog Services directly out of
+//! `dcp_core`'s shared, role-agnostic JWS/`did:web` primitives (for P) and
+//! a bare `axum::Router` returning a fixed catalog body (for O) - not
+//! `ds_catalog_broker_rs`, not `ds_catalog_broker_rs::dcp`. P's
+//! `mock_verify_dcp_bearer_token` function below is a faithful,
+//! independent reimplementation of the same verification flow the
+//! now-deleted `ds_catalog_broker_rs::dcp::verify_dcp_bearer_token` used
+//! to implement (resolve the caller's `did:web`, verify the signature,
+//! check `aud`/`exp`, re-package the nested token, POST it to the
+//! caller's Presentation API, verify the returned VP/VC) - not a stub
+//! that always says yes. Neither mock imports anything from
+//! `ds_catalog_broker_rs::dcp` (that module no longer exists); both are
+//! built only from `dcp_core` plus a bare `axum::Router`, so they keep
+//! working unmodified regardless of what this product's own binary does
+//! or does not serve.
 //!
 //! `dcp_core::HolderIdentity` (Instance H) is unaffected by any of this -
 //! the DCP *holder* role is explicitly staying in scope (gap analysis
@@ -252,17 +258,37 @@ struct OpenParticipant {
     _server: JoinHandle<()>,
 }
 
+/// `POST /dsp/catalog/request` - the mock open provider's DSP catalog
+/// endpoint. Unlike the gated provider below, this answers unconditionally
+/// - no `Authorization` header is required or inspected, matching a real
+/// open (unauthenticated) DSP Catalog Service.
+async fn mock_open_provider_catalog_request(State(body): State<Arc<Value>>) -> impl IntoResponse {
+    Json((*body).clone())
+}
+
+/// Spin up the mock open provider (Instance O), seeded with
+/// `OPEN-01`/`OPEN-02`, serving its own real (test-only)
+/// `/dsp/catalog/request` route - see the module doc's ["Why Instances O
+/// and P are no longer `ds-catalog-broker-rs` instances"] section for why
+/// this is a hand-built mock rather than a real `ds-catalog-broker-rs`
+/// instance.
 async fn spawn_open_participant() -> OpenParticipant {
     let (listener, addr) = bind_localhost().await;
-    let cache = Arc::new(InMemoryCatalogCache::new());
-    let mut catalog = Catalog::new("open-catalog", NodeId::new("open-participant"));
-    catalog.participant_id = Some("did:example:open-participant".to_string());
-    catalog.datasets.push(dataset("OPEN-01"));
-    catalog.datasets.push(dataset("OPEN-02"));
-    cache.upsert(catalog).await.expect("seed open catalog");
 
-    let state = AppState::new(cache);
-    let server = spawn(listener, build_router(state));
+    let body = Arc::new(json!({
+        "@id": "open-catalog",
+        "participantId": "did:example:open-participant",
+        "dataset": [
+            {"@id": "OPEN-01", "id": "OPEN-01"},
+            {"@id": "OPEN-02", "id": "OPEN-02"},
+        ],
+        "service": [],
+    }));
+
+    let app = Router::new()
+        .route("/dsp/catalog/request", post(mock_open_provider_catalog_request))
+        .with_state(body);
+    let server = spawn(listener, app);
 
     OpenParticipant {
         entry: ParticipantEntry {

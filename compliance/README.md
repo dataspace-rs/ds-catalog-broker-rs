@@ -1,3 +1,16 @@
+> **Historical / retired.** This harness targeted `POST /dsp/catalog/request`,
+> `GET /dsp/catalog/datasets/{id}`, and `GET /.well-known/dspace-version` -
+> a DSP catalog-*serving* surface this product no longer has, per
+> `docs/gap-analysis-2026-08-27.md` §1 (this product is a DSP Consumer /
+> Catalog Broker, and must never answer `CatalogRequestMessage` as a
+> Provider). `docker-compose.yml` and `tck.properties` have been moved to
+> `historical/` unmodified, and are kept as a record of the real,
+> `dsp-tck`-verified run described below - they are not expected to run
+> against this codebase again, and should not be re-run against a rebuilt
+> DSP-serving endpoint; there won't be one. The baseline log
+> (`baseline-run-2026-08-27.log`) is untouched. Everything below this note
+> describes the harness as it existed at the time it was run.
+
 # DSP TCK compliance environment
 
 A minimal harness for running the official
