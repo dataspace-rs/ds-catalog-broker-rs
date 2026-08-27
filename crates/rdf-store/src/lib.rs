@@ -7,7 +7,7 @@
 //! decision being made iteratively - see the `dataspace` study repo's
 //! `docs/spikes/` for the exploration behind that choice - so this crate
 //! only fixes the shape of the trait plus one in-memory implementation
-//! good enough to unblock `http-api` and its own tests.
+//! good enough to unblock `ds-catalog-broker-rs` and its own tests.
 //!
 //! The trait mirrors Eclipse EDC's `FederatedCatalogCache` SPI
 //! (`save`/`query`/`deleteExpired`/`expireAll`) but adapted to a
@@ -137,7 +137,7 @@ pub trait CatalogCache: Send + Sync {
 
 /// A simple, non-persistent [`CatalogCache`] backed by an in-process map.
 ///
-/// This exists so `http-api` (and this crate's own tests) have something
+/// This exists so `ds-catalog-broker-rs` (and this crate's own tests) have something
 /// to run against while the real RDF-backed implementation is chosen; it
 /// is not intended to be the production backend.
 pub mod memory {
@@ -175,7 +175,7 @@ pub mod memory {
                 .cloned()
                 .collect();
             // Deterministic ordering: HashMap iteration order isn't
-            // stable, and callers (e.g. http-api) need reproducible
+            // stable, and callers (e.g. ds-catalog-broker-rs) need reproducible
             // pagination.
             results.sort_by(|a, b| a.id.cmp(&b.id));
 

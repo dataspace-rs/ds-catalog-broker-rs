@@ -1,5 +1,5 @@
 //! Proves `crawler::crawl_once` against **real, running Eclipse EDC 0.18.0**
-//! control-plane instances - not this workspace's own `http-api`, not an
+//! control-plane instances - not this workspace's own `ds-catalog-broker-rs`, not an
 //! in-process test fixture. `#[ignore]`d because it depends on three
 //! external processes this repo does not manage: start them first (see
 //! `compliance/crawler-edc-fixture/`), then run

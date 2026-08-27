@@ -5,7 +5,7 @@
 //! this workspace's own compact DSP shape and real Eclipse EDC's fuller
 //! JSON-LD shape (see [`parse_catalog_response`]'s doc comment), and
 //! upserts the result into an `rdf_store::CatalogCache` - the same trait
-//! `http-api` serves `GET /catalog` and the DSP catalog endpoints from, so
+//! `ds-catalog-broker-rs` serves `GET /catalog` and the DSP catalog endpoints from, so
 //! a successful crawl cycle is immediately visible there.
 //!
 //! [`crawl_once`] runs exactly one cycle over every configured
@@ -26,7 +26,7 @@ use rdf_store::CatalogCache;
 use serde_json::Value;
 
 /// `@context` for the `CatalogRequestMessage` this crawler POSTs to each
-/// participant - matches what `http-api`'s own `catalog_request` handler
+/// participant - matches what `ds-catalog-broker-rs`'s own `catalog_request` handler
 /// already accepts (and, today, ignores the rest of).
 const DSP_CONTEXT_URL: &str = "https://w3id.org/dspace/2025/1/context.jsonld";
 
@@ -36,7 +36,7 @@ const DSP_CONTEXT_URL: &str = "https://w3id.org/dspace/2025/1/context.jsonld";
 /// header unconditionally, before any `IdentityService` ever runs - even
 /// when that participant's own identity service (e.g. a no-op/permissive
 /// one, or none at all beyond a bare presence check) would accept anything.
-/// This workspace's own `http-api` under `DspAuthMode::Disabled` ignores
+/// This workspace's own `ds-catalog-broker-rs` under `DspAuthMode::Disabled` ignores
 /// the header entirely either way, so sending a fixed, non-secret,
 /// non-empty placeholder here is harmless to it and required for real EDC
 /// interop - confirmed against a real, unmodified EDC 0.18.0 instance, see
@@ -169,8 +169,8 @@ async fn crawl_one(
 ///
 /// Also tolerates a "federation of federations" response - one where the
 /// crawled participant is itself a multi-participant aggregator (e.g.
-/// another instance of this workspace's own `http-api`, once it has 2+
-/// origin nodes cached: see `http-api`'s `catalog_request`) and so nests
+/// another instance of this workspace's own `ds-catalog-broker-rs`, once it has 2+
+/// origin nodes cached: see `ds-catalog-broker-rs`'s `catalog_request`) and so nests
 /// its real content under a top-level `catalog` array instead of top-level
 /// `dataset`/`service`. This crate's own data model is one `Catalog` per
 /// configured target participant, not per nested sub-participant, so any
@@ -454,8 +454,8 @@ mod tests {
 
     /// "Federation of federations": the crawled participant is itself a
     /// multi-participant aggregator (another instance of this workspace's
-    /// own `http-api`, once it has 2+ origin nodes cached - see
-    /// `http-api::catalog_request`'s doc comment), so its response has
+    /// own `ds-catalog-broker-rs`, once it has 2+ origin nodes cached - see
+    /// `ds_catalog_broker_rs::catalog_request`'s doc comment), so its response has
     /// empty top-level `dataset`/`service` and nests everything under
     /// `catalog[]` instead, one entry per sub-participant. Without
     /// flattening those nested entries, this would silently parse as an

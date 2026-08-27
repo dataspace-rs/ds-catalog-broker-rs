@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crawler::ParticipantsConfig;
 use dcp_core::HolderIdentity;
-use http_api::{AppState, DcpConfig, DspAuthConfig, DspAuthMode, build_router, seed_sample_catalog};
+use ds_catalog_broker_rs::{AppState, DcpConfig, DspAuthConfig, DspAuthMode, build_router, seed_sample_catalog};
 use rdf_store::CatalogCache;
 use rdf_store::memory::InMemoryCatalogCache;
 
@@ -163,9 +163,9 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .unwrap_or_else(|err| panic!("failed to bind {addr}: {err}"));
-    tracing::info!("http-api listening on {addr}");
+    tracing::info!("ds-catalog-broker-rs listening on {addr}");
 
     axum::serve(listener, app)
         .await
-        .expect("http-api server failed");
+        .expect("ds-catalog-broker-rs server failed");
 }

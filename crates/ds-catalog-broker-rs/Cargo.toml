@@ -1,13 +1,13 @@
 [package]
-name = "http-api"
+name = "ds-catalog-broker-rs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Axum HTTP server for the Federated Catalog Semantic Harvester: a dsp-tck-verified DSP catalog protocol surface, an internal Management-API-style aggregate view, and optional DCP-gated auth over the rdf-store cache trait."
+description = "Axum HTTP server for the DSP Catalog Broker: harvests 1..N upstream DSP Catalog Services into a unified semantic (RDF) cache and serves it locally as a dataset-list-per-participant view and a SPARQL endpoint - it does not itself answer incoming DSP CatalogRequestMessages."
 
 [[bin]]
-name = "http-api"
+name = "ds-catalog-broker-rs"
 path = "src/main.rs"
 
 [dependencies]

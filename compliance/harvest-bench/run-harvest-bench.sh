@@ -71,8 +71,8 @@ log "building crawler-edc-fixture classpath (if not already built)"
 log "building edc-fedcat-runtime classpath (if not already built)"
 ( cd "$FEDCAT_DIR" && ./gradlew --console=plain printClasspath ) || { log "FATAL: edc-fedcat-runtime build failed"; exit 1; }
 
-log "building http-api release binary (if not already built)"
-( cd "$REPO_ROOT" && cargo build --release -p http-api ) || { log "FATAL: cargo build failed"; exit 1; }
+log "building ds-catalog-broker-rs release binary (if not already built)"
+( cd "$REPO_ROOT" && cargo build --release -p ds-catalog-broker-rs ) || { log "FATAL: cargo build failed"; exit 1; }
 
 # --- Start the two new HARVEST EDC participants (shared by both phases) ---
 log "starting HARVEST-D (3 datasets, BASE_PORT=$HARVEST_D_BASE_PORT)"
@@ -145,10 +145,10 @@ sleep 3
 kill -0 "$FEDCAT_PID" 2>/dev/null && { log "still alive, force killing"; kill -9 "$FEDCAT_PID"; } || log "EDC crawler stopped cleanly"
 cp "$FEDCAT_DIR/logs/fedcat-crawler.log" "$RESULTS_DIR/edc-fedcat-crawler.log" 2>/dev/null || true
 
-# =========================== PHASE 2: this project's crates/crawler + http-api ===
-log "=== PHASE 2: federated-catalog-rs (crates/crawler + http-api) ==="
+# =========================== PHASE 2: this project's crates/crawler + ds-catalog-broker-rs ===
+log "=== PHASE 2: ds-catalog-broker-rs (crates/crawler + ds-catalog-broker-rs) ==="
 ( cd "$REPO_ROOT" && HTTP_API_ADDR="$RUST_ADDR" CRAWLER_CONFIG_PATH="$SCRIPT_DIR/participants.toml" \
-    nohup ./target/release/http-api > "$RESULTS_DIR/rust-http-api.log" 2>&1 & )
+    nohup ./target/release/ds-catalog-broker-rs > "$RESULTS_DIR/rust-http-api.log" 2>&1 & )
 
 sleep 5
 RUST_PID=$(ss -tlnp 2>/dev/null | grep ":19501 " | grep -oP 'pid=\K[0-9]+' | head -1)

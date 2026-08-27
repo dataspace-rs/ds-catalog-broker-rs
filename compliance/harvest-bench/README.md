@@ -31,7 +31,7 @@ brief.
 - `run-harvest-bench.sh` - the end-to-end driver. Starts the two new
   HARVEST-D/E participants (via `../crawler-edc-fixture/run-instance.sh`,
   unmodified), then runs each system under test in turn (EDC's crawler,
-  then this project's `http-api` with `CRAWLER_CONFIG_PATH` set),
+  then this project's `ds-catalog-broker-rs` with `CRAWLER_CONFIG_PATH` set),
   sampling RSS/CPU and running k6 while each system's harvest loop keeps
   running, checking correctness before and after each load-test window,
   and tearing everything down (trap-based cleanup) even on failure.
@@ -47,7 +47,7 @@ cd compliance/harvest-bench
 
 Prerequisites: same as `../crawler-edc-fixture/` (JDK 21, network access to
 Maven Central for the first Gradle resolution) plus `k6` and `python3` on
-`PATH`, and `cargo build --release -p http-api` buildable from the repo
+`PATH`, and `cargo build --release -p ds-catalog-broker-rs` buildable from the repo
 root (the driver script does this itself if needed).
 
 Fresh, non-overlapping port block used by this round (none of it collides
@@ -59,4 +59,4 @@ with the existing EDC-A/B/C fixture instances at
 | HARVEST-D (3 datasets) | 19201 | DSP 19221 |
 | HARVEST-E (7 datasets) | 19301 | DSP 19321 |
 | EDC federated-catalog crawler | 19401 | Management API 19411 |
-| `http-api` (Rust) | - | 19501 |
+| `ds-catalog-broker-rs` (Rust) | - | 19501 |

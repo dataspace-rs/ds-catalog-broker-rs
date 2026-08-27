@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "crates/catalog-core",
     "crates/rdf-store",
-    "crates/http-api",
+    "crates/ds-catalog-broker-rs",
     "crates/dcp-core",
     "crates/crawler",
     # Vendored as git submodules (see vendor/README.md) - contreforts-kg is
@@ -31,7 +31,7 @@ license = "Apache-2.0"
 # contreforts-core/contreforts-config inherit `authors.workspace = true`;
 # matches the author string their own (unvendored) Cargo.toml used.
 authors = ["Deepthought Solutions"]
-repository = "https://labs.deepthought-solutions.net/Deepthought-Solutions/federated-catalog-rs"
+repository = "https://github.com/Deepthought-Solutions/ds-catalog-broker-rs"
 
 [workspace.dependencies]
 async-trait = "0.1"
@@ -48,16 +48,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 urlencoding = "2"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
-# Used by http-api to mint @id values (urn:uuid:...) for synthesized DSP
+# Used by ds-catalog-broker-rs to mint @id values (urn:uuid:...) for synthesized DSP
 # JSON-LD documents (Catalog, Offer, CatalogError) that have no natural
 # stable identifier of their own.
 uuid = { version = "1", features = ["v4"] }
-# Used by http-api's DspAuthMode::Dcp (see compliance/dcp-test-env/) for
+# Used by ds-catalog-broker-rs's DspAuthMode::Dcp (see compliance/dcp-test-env/) for
 # did:web resolution and calling a holder's DCP Presentation API.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # ES256 sign/verify for DCP self-issued tokens and the outgoing
 # re-packaged token - used directly (JWS compact serialization built and
-# parsed by hand in http-api) rather than through a JWT-framework crate,
+# parsed by hand in ds-catalog-broker-rs) rather than through a JWT-framework crate,
 # since the only two operations needed are "sign this JSON with my key"
 # and "verify this JWS against a JWK's raw x/y", and jsonwebtoken's JWK
 # support added more format-conversion friction than it saved.

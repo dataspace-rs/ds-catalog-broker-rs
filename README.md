@@ -1,6 +1,6 @@
 # Semantic Catalog Broker
 
-*(repo/package name: `federated-catalog-rs`)*
+*(repo name: `ds-catalog-broker-rs`; product binary/crate: `ds-catalog-broker-rs`, `crates/http-api` before this project's rebrand)*
 
 An iterative, from-scratch Rust rewrite of [Eclipse EDC](https://projects.eclipse.org/projects/technology.edc)'s
 **Federated Catalog** module, built around what the [Dataspace Protocol (DSP) specification](https://raw.githubusercontent.com/eclipse-dataspace-protocol-base/DataspaceProtocol/main/catalog/catalog.protocol.md)
@@ -36,7 +36,8 @@ not, answer incoming DSP `CatalogRequestMessage`s, negotiate contracts,
 or transfer data. Those are the job of a dataspace participant's *other*
 connector components — the ones this product addresses when it crawls
 them. Conflating the two was an early mistake in this project (this
-product's own `http-api` used to expose a `POST /dsp/catalog/request`
+product's own `ds-catalog-broker-rs` crate (then named `http-api`) used to
+expose a `POST /dsp/catalog/request`
 provider endpoint) — see
 [`docs/gap-analysis-2026-08-27.md`](docs/gap-analysis-2026-08-27.md) for
 the corrective work that follows from fixing it.
@@ -124,7 +125,8 @@ top), but as separate Rust crates rather than Java SPI modules:
   scheduled crawl loop (`spawn_scheduler`/`crawl_once`), and a lenient
   DSP-response parser tolerant of real Eclipse EDC's JSON-LD shape, not
   just this project's own.
-- `http-api` — this product's own HTTP surface. Today it also exposes a
+- `ds-catalog-broker-rs` — this product's own HTTP surface (crate/binary
+  name; `crates/http-api` until this project's rebrand). Today it also exposes a
   DSP catalog-serving endpoint left over from before this product's
   scope was corrected to the Catalog Broker role above — see the gap
   analysis for exactly what's being removed and what's replacing it (a
@@ -160,11 +162,11 @@ implements `CatalogCache` on top of it — via `contreforts-kg`, an
 existing internal Oxigraph wrapper from a separate private repo, rather
 than the bare `oxigraph` crate directly.
 
-`http-api` uses this backend whenever a harvester config is supplied
+`ds-catalog-broker-rs` uses this backend whenever a harvester config is supplied
 (`CRAWLER_CONFIG_PATH` set) — in-memory Oxigraph only, matching EDC's own
 federated-catalog cache, which has no on-disk persistence option either;
 crawled data is expected to be repopulated on every restart, not durably
-stored. With no harvester configured, `http-api` falls back to a plain
+stored. With no harvester configured, `ds-catalog-broker-rs` falls back to a plain
 `InMemoryCatalogCache` (a bare `HashMap`, not RDF-backed at all).
 
 **Not yet a real triple store.** Today it's still a "first cut" JSON-blob
@@ -183,7 +185,7 @@ is required, not optional, follow-up work — see the gap analysis.
 
 The sections above describe the **corrected target scope** (Catalog
 Broker role, semantic cache, dataset-list + SPARQL serving). The
-codebase does not fully match it yet — most notably, `http-api` still
+codebase does not fully match it yet — most notably, `ds-catalog-broker-rs` still
 contains a DSP catalog-serving endpoint (`POST /dsp/catalog/request`,
 `GET /dsp/catalog/datasets/{id}`, `.well-known/dspace-version`, and the
 `DspAuthMode`/`DspAuthConfig` gating system built to protect it) that
@@ -238,7 +240,7 @@ crates/
   rdf-store/      CatalogCache trait + in-memory and Oxigraph-backed ("semantic cache") implementations
   dcp-core/       shared DCP JWS/did:web primitives (verifier + holder roles)
   crawler/        the crawl engine: participant registry, scheduled crawl loop, DSP response parser
-  http-api/       this product's HTTP surface - being corrected, see docs/gap-analysis-2026-08-27.md
+  ds-catalog-broker-rs/  this product's HTTP surface - being corrected, see docs/gap-analysis-2026-08-27.md
 docs/
   diagrams/                   architecture SVGs referenced from this README
   gap-analysis-2026-08-27.md  what to remove/keep/build to match the Catalog Broker scope

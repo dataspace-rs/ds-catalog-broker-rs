@@ -21,8 +21,8 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 # Only for crates/crawler/tests/multi_participant_crawl.rs - a hermetic
-# multi-instance integration test that runs real http-api server instances
-# in-process. Not needed by any library code in this crate.
-http-api = { path = "../http-api" }
+# multi-instance integration test that runs real ds-catalog-broker-rs server
+# instances in-process. Not needed by any library code in this crate.
+ds-catalog-broker-rs = { path = "../ds-catalog-broker-rs" }
 axum = { workspace = true }
 tracing-subscriber = { workspace = true }

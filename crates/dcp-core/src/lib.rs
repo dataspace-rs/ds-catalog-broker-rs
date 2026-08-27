@@ -5,14 +5,14 @@
 //!
 //! This crate hand-rolls JWS and does its own `did:web` resolution over
 //! plain HTTP requests, rather than pulling in a JSON-LD or full
-//! JWT-framework crate - see `http-api`'s `dcp.rs` module doc comment for
+//! JWT-framework crate - see `ds-catalog-broker-rs`'s `dcp.rs` module doc comment for
 //! the rationale (unchanged by this extraction).
 //!
 //! Everything here is deliberately **role-agnostic**: the same "sign this
 //! JSON with my key" / "verify this compact JWS against a resolved JWK" /
 //! "resolve a did:web" operations are needed both by a *verifier*
 //! (relying party checking an incoming self-issued token, see
-//! `http-api::dcp`) and by a *holder* (a party presenting its own
+//! `ds_catalog_broker_rs::dcp`) and by a *holder* (a party presenting its own
 //! credential to someone else's DSP endpoint - not yet implemented
 //! anywhere in this workspace). Nothing in this crate assumes which side
 //! of that exchange the caller is playing.
@@ -344,7 +344,7 @@ impl HolderIdentity {
     /// `did:web:<own_did_host, ':' percent-encoded>:dsp:holder` - two
     /// colon-separated segments, matching `did_web_to_url`'s
     /// segments-joined-by-"/" resolution to `.../dsp/holder/did.json`,
-    /// the actual route `http_api::build_router` registers - and a new
+    /// the actual route `ds_catalog_broker_rs::build_router` registers - and a new
     /// signing key is generated (see this type's doc comment for why that
     /// key is never persisted).
     pub fn new(own_did_host: String, insecure_http: bool, credential_jws: String, required_scope: String) -> Self {
@@ -366,7 +366,7 @@ impl HolderIdentity {
     ///
     /// The published `serviceEndpoint` is a *base* URL
     /// (`.../dsp/holder`), not the complete Presentation API endpoint -
-    /// `http-api::dcp::verify_dcp_bearer_token` (the verifier side, already
+    /// `ds_catalog_broker_rs::dcp::verify_dcp_bearer_token` (the verifier side, already
     /// validated against a real running `eclipse-edc/IdentityHub` before
     /// this holder role existed - see `compliance/benchmark-dcp-2026-08-27.md`)
     /// appends `/presentations/query` itself. Publishing the complete URL
@@ -384,7 +384,7 @@ impl HolderIdentity {
     /// participant's DSP catalog endpoint, addressed to
     /// `target_provider_did` (that participant's own DID, used as `aud`).
     ///
-    /// Shaped to exactly what `http-api::dcp::verify_dcp_bearer_token`
+    /// Shaped to exactly what `ds_catalog_broker_rs::dcp::verify_dcp_bearer_token`
     /// expects on the receiving end: `iss`/`sub` = this holder's own DID,
     /// `aud` = `target_provider_did`, and a nested `token` claim (T2 - a
     /// presentation-access-token, itself a JWS signed with this same key,

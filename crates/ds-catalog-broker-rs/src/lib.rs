@@ -3,7 +3,7 @@
 //! Exposes a health check and a `GET /catalog` endpoint backed by
 //! `rdf-store`'s `CatalogCache` trait. The catalog endpoint is
 //! intentionally thin - it exists to prove the wiring between
-//! `http-api`, `catalog-core` types, and the `rdf-store` cache trait works
+//! `ds-catalog-broker-rs`, `catalog-core` types, and the `rdf-store` cache trait works
 //! end to end, not to be a finished Management API. Query parameters,
 //! pagination shape, and response JSON-LD framing (EDC's Management API
 //! returns `dspace:`/`edc:` JSON-LD) are all deferred to a later
