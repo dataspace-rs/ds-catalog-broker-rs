@@ -470,6 +470,8 @@ pub mod oxigraph_backend {
     use contreforts_kg::GraphError;
     use contreforts_kg::store::GraphStore;
     use oxigraph::model::{Literal, NamedNode, NamedOrBlankNode, Quad, Term};
+    use oxigraph::sparql::results::{QueryResultsFormat, QueryResultsSerializer};
+    use oxigraph::sparql::{QueryResults, SparqlEvaluator};
     use oxigraph::store::StorageError;
     use std::collections::BTreeMap;
     use std::path::Path;
@@ -492,6 +494,46 @@ pub mod oxigraph_backend {
             StoreError::Backend(err.to_string())
         }
     }
+
+    /// Errors specific to evaluating an arbitrary SPARQL query through
+    /// [`OxigraphCatalogCache::sparql_query_json`] - kept distinct from
+    /// [`StoreError`] because these are about a caller-supplied query
+    /// string (usually the caller's own fault: bad syntax, an
+    /// unsupported query form), not about the store itself.
+    #[derive(Debug, Error)]
+    pub enum SparqlError {
+        /// The query string failed to parse as a SPARQL **Query** (the
+        /// `SELECT`/`ASK`/`CONSTRUCT`/`DESCRIBE` grammar). This is also
+        /// what happens for a SPARQL **Update** operation submitted here
+        /// (`INSERT DATA`, `DELETE`, `LOAD`, `CLEAR`, ...): those belong to
+        /// a different grammar entirely, one this method never parses
+        /// with (see the method's own doc comment on why that alone is
+        /// the read-only guarantee, not a separate check bolted on after).
+        #[error("invalid SPARQL query: {0}")]
+        Parse(String),
+        /// The query parsed but failed during evaluation (e.g. a type
+        /// error in a `FILTER` expression).
+        #[error("SPARQL query evaluation failed: {0}")]
+        Evaluation(String),
+        /// The query was a well-formed `CONSTRUCT`/`DESCRIBE` - this
+        /// method only serializes `SELECT`/`ASK` results (the gap
+        /// analysis's stated minimum), since a graph result needs a
+        /// different response media type (an RDF serialization, not
+        /// `application/sparql-results+json`) that is out of scope here.
+        #[error(
+            "CONSTRUCT/DESCRIBE queries are not supported by this endpoint - only SELECT and ASK are"
+        )]
+        UnsupportedGraphResult,
+        /// Writing the (already-evaluated) result set as
+        /// `application/sparql-results+json` failed. Distinguished from
+        /// `Evaluation` because a query that reaches this point already
+        /// evaluated successfully - a failure here points at the
+        /// serializer/writer, not at the caller's query.
+        #[error("failed to serialize SPARQL results: {0}")]
+        Serialize(String),
+    }
+
+    pub type SparqlQueryResult<T> = Result<T, SparqlError>;
 
     // --- Fixed vocabulary terms -------------------------------------------------
     //
@@ -1081,6 +1123,121 @@ pub mod oxigraph_backend {
                 },
             ))
         }
+
+        /// Evaluate an arbitrary, caller-supplied SPARQL query and return
+        /// the result serialized as
+        /// [`application/sparql-results+json`](https://www.w3.org/TR/sparql11-results-json/)
+        /// bytes - the HTTP surface in `ds-catalog-broker-rs` (gap analysis
+        /// §3.3) writes these bytes straight through as the response body.
+        ///
+        /// ## Why this lives here, not on the `CatalogCache` trait
+        ///
+        /// SPARQL evaluation is an Oxigraph-specific capability with no
+        /// equivalent in [`memory::InMemoryCatalogCache`] (a plain
+        /// `HashMap`, not an RDF store at all) - forcing every backend to
+        /// implement it would mean either a panic/`Err` stub on the
+        /// in-memory side or inventing a query language the in-memory
+        /// backend could actually serve, neither of which is worth it for
+        /// a backend that exists only to unblock tests and the
+        /// no-crawler-configured default (see this crate's module doc).
+        /// So this is an inherent method on the concrete
+        /// [`OxigraphCatalogCache`] type instead - additive, doesn't touch
+        /// the trait's signature at all. The HTTP layer holds an
+        /// `Option<Arc<OxigraphCatalogCache>>` alongside its
+        /// `Arc<dyn CatalogCache>` and answers "SPARQL not available" (501)
+        /// when it's `None`, i.e. whenever the in-memory backend is
+        /// running.
+        ///
+        /// ## Why the whole store, not one named graph, by default
+        ///
+        /// A crawled catalog's triples live in a per-origin-node named
+        /// graph (this module's own "Named graph" mapping above), not the
+        /// default graph - so a plain `SELECT * WHERE { ?s ?p ?o }` with no
+        /// `GRAPH` clause would, under SPARQL's normal rules, match only
+        /// the (always-empty) default graph and never see any harvested
+        /// data at all. That would silently defeat "search everything I've
+        /// harvested", the primary use case the gap analysis calls out.
+        /// Instead, whenever the query itself does not already specify its
+        /// own dataset (no `FROM`/`FROM NAMED`, checked via
+        /// `QueryDataset::is_default_dataset`), this method sets the
+        /// query's default graph to the union of every named graph in the
+        /// store (`QueryDataset::set_default_graph_as_union`) before
+        /// executing it - so a plain triple pattern with no `GRAPH` clause
+        /// searches every harvested participant's graph at once, which is
+        /// what "the whole store" should mean here.
+        ///
+        /// A caller that wants to scope to one participant still can,
+        /// without any bespoke query-param feature, via SPARQL's own
+        /// `GRAPH <iri>` clause (the exact graph IRI scheme is documented
+        /// above, under "Resource IRIs") - or via the query's own
+        /// `FROM`/`FROM NAMED`, which this method leaves untouched when
+        /// present (`is_default_dataset()` is only true when the query
+        /// didn't specify one itself). That satisfies the gap analysis's
+        /// stretch goal ("via SPARQL's own GRAPH clause... rather than a
+        /// bespoke query-param feature") without any extra code here.
+        ///
+        /// ## Why this is inherently read-only
+        ///
+        /// This method only ever calls [`SparqlEvaluator::parse_query`],
+        /// which parses the SPARQL 1.1 **Query** grammar
+        /// (`SELECT`/`ASK`/`CONSTRUCT`/`DESCRIBE`) - never
+        /// `SparqlEvaluator::parse_update` or `Store::update`, which is
+        /// the only code path in `oxigraph` that can mutate a store via
+        /// SPARQL. A SPARQL Update string (`INSERT DATA { ... }`,
+        /// `DELETE ...`, `LOAD`, `CLEAR`, ...) simply fails to parse as a
+        /// Query - it is not reachable through this method at all, not
+        /// merely rejected after being recognized. See
+        /// `sparql_update_operation_is_rejected_not_silently_ignored`
+        /// below for a test proving this.
+        ///
+        /// ## Result shape
+        ///
+        /// - `ASK` -> `{"head":{},"boolean":<bool>}`.
+        /// - `SELECT` -> `{"head":{"vars":[...]},"results":{"bindings":[...]}}`,
+        ///   using `oxigraph`'s own `sparesults`-backed serializer, so IRI
+        ///   vs. literal vs. blank node, datatypes, and language tags all
+        ///   come out exactly per the W3C JSON Results spec - this method
+        ///   never hand-rolls that format.
+        /// - `CONSTRUCT`/`DESCRIBE` -> `Err(SparqlError::UnsupportedGraphResult)`,
+        ///   see that variant's own doc comment.
+        pub fn sparql_query_json(&self, query: &str) -> SparqlQueryResult<Vec<u8>> {
+            let mut prepared = SparqlEvaluator::new()
+                .parse_query(query)
+                .map_err(|err| SparqlError::Parse(err.to_string()))?;
+
+            if prepared.dataset().is_default_dataset() {
+                prepared.dataset_mut().set_default_graph_as_union();
+            }
+
+            let results = prepared
+                .on_store(self.store.inner())
+                .execute()
+                .map_err(|err| SparqlError::Evaluation(err.to_string()))?;
+
+            let serializer = QueryResultsSerializer::from_format(QueryResultsFormat::Json);
+            match results {
+                QueryResults::Boolean(value) => serializer
+                    .serialize_boolean_to_writer(Vec::new(), value)
+                    .map_err(|err| SparqlError::Serialize(err.to_string())),
+                QueryResults::Solutions(solutions) => {
+                    let variables = solutions.variables().to_vec();
+                    let mut writer = serializer
+                        .serialize_solutions_to_writer(Vec::new(), variables)
+                        .map_err(|err| SparqlError::Serialize(err.to_string()))?;
+                    for solution in solutions {
+                        let solution =
+                            solution.map_err(|err| SparqlError::Evaluation(err.to_string()))?;
+                        writer
+                            .serialize(&solution)
+                            .map_err(|err| SparqlError::Serialize(err.to_string()))?;
+                    }
+                    writer
+                        .finish()
+                        .map_err(|err| SparqlError::Serialize(err.to_string()))
+                }
+                QueryResults::Graph(_) => Err(SparqlError::UnsupportedGraphResult),
+            }
+        }
     }
 
     #[async_trait]
@@ -1434,6 +1591,140 @@ pub mod oxigraph_backend {
                 matches!(&q.subject, NamedOrBlankNode::NamedNode(n) if n.as_str().contains("ds-1") || n.as_str().contains("ds-2"))
             });
             assert!(!leaked_old_dataset, "old catalog's dataset triples must not survive a wholesale upsert");
+        }
+
+        // --- `sparql_query_json` (gap analysis §3.3) --------------------------
+
+        /// A plain `SELECT` with no `GRAPH`/`FROM` clause at all must still
+        /// find data crawled from two *different* origin nodes (two
+        /// separate named graphs) - proving the "whole store by default"
+        /// union-graph behavior documented on `sparql_query_json`, not just
+        /// that the method returns something.
+        #[tokio::test]
+        async fn sparql_query_json_select_with_no_graph_clause_searches_every_named_graph() {
+            let cache = cache();
+            cache
+                .upsert(sample_catalog("node-a", "cat-a"))
+                .await
+                .unwrap();
+            cache
+                .upsert(sample_catalog("node-b", "cat-b"))
+                .await
+                .unwrap();
+
+            let bytes = cache
+                .sparql_query_json(&format!(
+                    "PREFIX dcat: <{DCAT_NS}> SELECT ?catalog WHERE {{ ?catalog a dcat:Catalog }}"
+                ))
+                .unwrap();
+            let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+            assert_eq!(parsed["head"]["vars"], serde_json::json!(["catalog"]));
+            let bindings = parsed["results"]["bindings"].as_array().unwrap();
+            assert_eq!(bindings.len(), 2, "expected one dcat:Catalog per origin node, got {parsed}");
+            let mut catalog_iris: Vec<&str> = bindings
+                .iter()
+                .map(|b| b["catalog"]["value"].as_str().unwrap())
+                .collect();
+            catalog_iris.sort_unstable();
+            assert!(catalog_iris[0].contains("node-a") && catalog_iris[0].contains("cat-a"));
+            assert!(catalog_iris[1].contains("node-b") && catalog_iris[1].contains("cat-b"));
+            // And the JSON Results type/value shape is real, not
+            // hand-rolled: a resource binding must come back as a `uri`.
+            assert_eq!(bindings[0]["catalog"]["type"], serde_json::json!("uri"));
+        }
+
+        /// The `GRAPH <iri>` clause (the documented stretch-goal way to
+        /// scope a query to one participant) finds only that participant's
+        /// data, even though the store as a whole holds two.
+        #[tokio::test]
+        async fn sparql_query_json_graph_clause_scopes_to_one_participant() {
+            let cache = cache();
+            cache
+                .upsert(sample_catalog("node-a", "cat-a"))
+                .await
+                .unwrap();
+            cache
+                .upsert(sample_catalog("node-b", "cat-b"))
+                .await
+                .unwrap();
+
+            let scoped_graph = node_iri(&NodeId::new("node-b"));
+            let bytes = cache
+                .sparql_query_json(&format!(
+                    "PREFIX dcat: <{DCAT_NS}> SELECT ?catalog WHERE {{ GRAPH <{}> {{ ?catalog a dcat:Catalog }} }}",
+                    scoped_graph.as_str()
+                ))
+                .unwrap();
+            let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let bindings = parsed["results"]["bindings"].as_array().unwrap();
+            assert_eq!(bindings.len(), 1);
+            assert!(bindings[0]["catalog"]["value"].as_str().unwrap().contains("node-b"));
+        }
+
+        /// A real `ASK` query, through the same HTTP-facing method,
+        /// against real harvested-looking data (the "rich" catalog fixture
+        /// used elsewhere in this module).
+        #[tokio::test]
+        async fn sparql_query_json_ask_returns_the_spec_shaped_boolean_result() {
+            let cache = cache();
+            cache.upsert(rich_catalog()).await.unwrap();
+
+            let bytes = cache
+                .sparql_query_json(&format!(
+                    "PREFIX dcat: <{DCAT_NS}> ASK {{ ?d a dcat:Dataset ; dcat:distribution ?dist . ?dist dcat:accessService ?svc }}"
+                ))
+                .unwrap();
+            let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(parsed, serde_json::json!({"head": {}, "boolean": true}));
+        }
+
+        /// A SPARQL **Update** operation (`INSERT DATA`) must never be
+        /// reachable through this method - proving the "read-only by
+        /// construction" claim in `sparql_query_json`'s own doc comment,
+        /// not just documenting it.
+        #[tokio::test]
+        async fn sparql_update_operation_is_rejected_not_silently_ignored() {
+            let cache = cache();
+            cache.upsert(sample_catalog("node-1", "cat-1")).await.unwrap();
+
+            let attempted_injection = format!(
+                "PREFIX dcat: <{DCAT_NS}> INSERT DATA {{ GRAPH <{}> {{ <urn:x> a dcat:Catalog }} }}",
+                node_iri(&NodeId::new("node-1")).as_str()
+            );
+            let outcome = cache.sparql_query_json(&attempted_injection);
+            assert!(
+                matches!(outcome, Err(SparqlError::Parse(_))),
+                "expected an Update operation to fail to parse as a Query, got {outcome:?}"
+            );
+
+            // And, just as importantly, nothing was actually inserted -
+            // the store is unaffected by the attempt.
+            let results = cache.query(CatalogQuery::all()).await.unwrap();
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].id, "cat-1");
+        }
+
+        /// `CONSTRUCT` is a well-formed Query, just not one this method
+        /// serializes (see `SparqlError::UnsupportedGraphResult`'s own doc
+        /// comment) - it must fail cleanly, not panic or silently return
+        /// an empty/wrong result.
+        #[tokio::test]
+        async fn sparql_query_json_rejects_construct_queries_cleanly() {
+            let cache = cache();
+            cache.upsert(sample_catalog("node-1", "cat-1")).await.unwrap();
+
+            let outcome = cache.sparql_query_json("CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }");
+            assert!(matches!(outcome, Err(SparqlError::UnsupportedGraphResult)));
+        }
+
+        /// A syntactically invalid query string is a `Parse` error, not a
+        /// panic and not silently empty results.
+        #[tokio::test]
+        async fn sparql_query_json_rejects_malformed_query_syntax() {
+            let cache = cache();
+            let outcome = cache.sparql_query_json("this is not sparql at all");
+            assert!(matches!(outcome, Err(SparqlError::Parse(_))));
         }
     }
 }

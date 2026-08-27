@@ -55,33 +55,47 @@ async fn main() {
     // loop. `InMemoryCatalogCache` (a plain `HashMap`, not backed by RDF
     // at all) stays the default for everyone not opting into the crawler,
     // per this function's own strict backward-compatibility requirement.
-    let (cache, holder): (Arc<dyn CatalogCache>, Option<Arc<HolderIdentity>>) = match load_crawler_config() {
+    let (cache, holder, sparql): (
+        Arc<dyn CatalogCache>,
+        Option<Arc<HolderIdentity>>,
+        Option<Arc<rdf_store::oxigraph_backend::OxigraphCatalogCache>>,
+    ) = match load_crawler_config() {
         Some(config) => {
-            let cache: Arc<dyn CatalogCache> =
-                Arc::new(rdf_store::oxigraph_backend::OxigraphCatalogCache::in_memory().expect("open in-memory Oxigraph store"));
+            // Kept as a concrete `Arc<OxigraphCatalogCache>` (not just the
+            // `Arc<dyn CatalogCache>` coercion below) purely so `AppState`
+            // can also wire up `/sparql` against it - see
+            // `AppState::sparql`'s own doc comment for why that can't be
+            // recovered from the trait object alone.
+            let store = Arc::new(
+                rdf_store::oxigraph_backend::OxigraphCatalogCache::in_memory()
+                    .expect("open in-memory Oxigraph store"),
+            );
+            let cache: Arc<dyn CatalogCache> = store.clone();
             let holder = build_holder(&config);
             tracing::info!(
                 participants = config.participants.len(),
                 interval_secs = config.interval_secs,
                 holder_configured = holder.is_some(),
-                "starting scheduled catalog crawler (CRAWLER_CONFIG_PATH set); serving from an in-memory Oxigraph store"
+                "starting scheduled catalog crawler (CRAWLER_CONFIG_PATH set); serving from an in-memory Oxigraph store, with /sparql enabled"
             );
             crawler::spawn_scheduler(cache.clone(), config, http_client.clone(), holder.clone());
-            (cache, holder)
+            (cache, holder, Some(store))
         }
         None => {
             // No crawler configured: the plain in-memory cache, seeded
             // with one sample catalog - this stands in for a real crawl
-            // result until CRAWLER_CONFIG_PATH is set.
+            // result until CRAWLER_CONFIG_PATH is set. No SPARQL backend
+            // either (see `AppState::sparql`'s doc comment): `/sparql`
+            // answers 501 until a real Oxigraph-backed crawl is running.
             let cache: Arc<dyn CatalogCache> = Arc::new(InMemoryCatalogCache::new());
             seed_sample_catalog(&*cache)
                 .await
                 .expect("seeding sample catalog failed");
-            (cache, None)
+            (cache, None, None)
         }
     };
 
-    let mut state = AppState::new(cache).with_holder(holder);
+    let mut state = AppState::new(cache).with_holder(holder).with_sparql(sparql);
     state.http = http_client;
     let app = build_router(state);
 

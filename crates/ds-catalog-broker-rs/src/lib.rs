@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use axum::{
-    Json, Router,
+    Form, Json, Router,
     extract::{Query, State},
     http::{HeaderMap, StatusCode, header::AUTHORIZATION},
     response::IntoResponse,
@@ -20,6 +20,7 @@ use axum::{
 };
 use catalog_core::{Catalog, DataService, Dataset, Distribution, NodeId};
 pub use dcp_core::HolderIdentity;
+use rdf_store::oxigraph_backend::{OxigraphCatalogCache, SparqlError};
 use rdf_store::{CatalogCache, CatalogQuery, StoreResult};
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +40,16 @@ pub struct AppState {
     /// `None` means this connector presents no credential of its own and
     /// the two `/dsp/holder/*` routes below 404.
     pub holder: Option<Arc<HolderIdentity>>,
+    /// The concrete Oxigraph-backed cache, held *in addition to* the
+    /// type-erased `cache` field above, purely so `GET`/`POST /sparql` can
+    /// reach `OxigraphCatalogCache::sparql_query_json` - a capability that
+    /// exists on that concrete type, not on the `CatalogCache` trait (see
+    /// that method's own doc comment for why). `Some` exactly when `cache`
+    /// is backed by Oxigraph (i.e. `CRAWLER_CONFIG_PATH` was set, see
+    /// `main.rs`); `None` when it's the plain in-memory backend, in which
+    /// case `/sparql` answers 501 rather than pretending to support a
+    /// query language that backend doesn't implement.
+    pub sparql: Option<Arc<OxigraphCatalogCache>>,
 }
 
 impl AppState {
@@ -47,6 +58,7 @@ impl AppState {
             cache,
             http: reqwest::Client::new(),
             holder: None,
+            sparql: None,
         }
     }
 
@@ -54,6 +66,13 @@ impl AppState {
     /// See the `holder` field's doc comment.
     pub fn with_holder(mut self, holder: Option<Arc<HolderIdentity>>) -> Self {
         self.holder = holder;
+        self
+    }
+
+    /// Builder-style setter wiring up the SPARQL endpoint against a real
+    /// Oxigraph-backed cache. See the `sparql` field's doc comment.
+    pub fn with_sparql(mut self, sparql: Option<Arc<OxigraphCatalogCache>>) -> Self {
+        self.sparql = sparql;
         self
     }
 }
@@ -108,6 +127,10 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/catalog", get(get_catalog))
+        // The SPARQL 1.1 Protocol query surface (gap analysis §3.3) - see
+        // `sparql_route`'s own doc comment for the exact request/response
+        // shape supported.
+        .route("/sparql", get(sparql_route_get).post(sparql_route_post))
         // This connector's own DCP *holder* identity (see `AppState::holder`'s
         // doc comment) - this participant's own credential-presentation
         // capability for crawling a DCP-gated remote participant. Both
@@ -208,6 +231,138 @@ async fn get_catalog(
             }),
         )
             .into_response(),
+    }
+}
+
+/// `application/sparql-results+json`, the one result media type this
+/// endpoint produces (gap analysis §3.3's stated minimum).
+const SPARQL_RESULTS_JSON: &str = "application/sparql-results+json";
+
+/// `GET /sparql?query=...` - the SPARQL 1.1 Protocol's URL-encoded GET
+/// form. See [`sparql_route`] for the shared handling.
+#[derive(Debug, Deserialize)]
+struct SparqlGetParams {
+    query: Option<String>,
+}
+
+async fn sparql_route_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<SparqlGetParams>,
+) -> impl IntoResponse {
+    sparql_route(state, headers, params.query).await
+}
+
+/// `POST /sparql` with `Content-Type: application/x-www-form-urlencoded`
+/// and a `query` form field - the SPARQL 1.1 Protocol's other mandated
+/// way to submit a query.
+///
+/// The protocol also allows a second POST style - a raw SPARQL string as
+/// the body with `Content-Type: application/sparql-query` - but requires
+/// only "at least one" query mechanism beyond plain GET, per the gap
+/// analysis's own framing of the spec ("query" parameter over GET/POST).
+/// Form-encoded POST is implemented here (this is that "at least one");
+/// direct `application/sparql-query` bodies are not. Chosen over the raw
+/// form because it composes with a plain HTML `<form>` and with the
+/// default POST mode of common SPARQL client libraries (e.g. Python's
+/// `SPARQLWrapper`), needing no bespoke `Content-Type` handling in this
+/// router beyond the URL-encoded body Axum's own `Form` extractor already
+/// parses.
+#[derive(Debug, Deserialize)]
+struct SparqlPostForm {
+    query: Option<String>,
+}
+
+async fn sparql_route_post(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<SparqlPostForm>,
+) -> impl IntoResponse {
+    sparql_route(state, headers, form.query).await
+}
+
+/// Whether `headers`' `Accept` value (if any) allows an
+/// `application/sparql-results+json` response.
+///
+/// A missing `Accept` header allows it (HTTP's own "no preference"
+/// default). Otherwise, at least one comma-separated media range must be
+/// `application/sparql-results+json`, the bare `application/json` (a
+/// reasonable specific-enough match for a JSON-speaking client that
+/// doesn't know the SPARQL-specific type), or a wildcard (`*/*`,
+/// `application/*`) - any `;q=...` parameter is ignored, since there is
+/// only one representation on offer here to weight against.
+fn accepts_sparql_results_json(headers: &HeaderMap) -> bool {
+    let Some(accept) = headers.get(axum::http::header::ACCEPT).and_then(|v| v.to_str().ok()) else {
+        return true;
+    };
+    accept.split(',').any(|range| {
+        matches!(
+            range.split(';').next().unwrap_or("").trim(),
+            SPARQL_RESULTS_JSON | "application/json" | "*/*" | "application/*"
+        )
+    })
+}
+
+/// Shared `GET`/`POST /sparql` handling - see `build_router`'s doc
+/// comment for why both exist, and `rdf_store::oxigraph_backend`'s
+/// `sparql_query_json` for the actual evaluation this delegates to
+/// (read-only by construction, whole-store-by-default, real
+/// `application/sparql-results+json` output).
+///
+/// - No `sparql` backend configured (`AppState::sparql` is `None`, i.e.
+///   the in-memory cache is running - see that field's doc comment): 501
+///   Not Implemented. This is a genuine backend limitation, not a
+///   not-yet-built route, hence 501 rather than 404.
+/// - Missing/empty `query`: 400 Bad Request.
+/// - `Accept` header present and none of its media ranges match
+///   `application/sparql-results+json` (see `accepts_sparql_results_json`):
+///   406 Not Acceptable.
+/// - Query fails to parse, fails to evaluate, or is a `CONSTRUCT`/
+///   `DESCRIBE` (unsupported result shape - see `SparqlError`'s own doc
+///   comments): 400 Bad Request with a plain-text explanation - these are
+///   all the caller's own query's fault.
+/// - Otherwise: 200 with an `application/sparql-results+json` body.
+async fn sparql_route(state: AppState, headers: HeaderMap, query: Option<String>) -> axum::response::Response {
+    let Some(sparql) = &state.sparql else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            "this instance is running the in-memory catalog cache, which has no SPARQL \
+             (Oxigraph) backend - set CRAWLER_CONFIG_PATH to enable the SPARQL endpoint"
+                .to_string(),
+        )
+            .into_response();
+    };
+
+    if !accepts_sparql_results_json(&headers) {
+        return (
+            StatusCode::NOT_ACCEPTABLE,
+            format!("this endpoint only produces {SPARQL_RESULTS_JSON}"),
+        )
+            .into_response();
+    }
+
+    let query = match query.filter(|q| !q.trim().is_empty()) {
+        Some(query) => query,
+        None => {
+            return (StatusCode::BAD_REQUEST, "missing required 'query' parameter".to_string())
+                .into_response();
+        }
+    };
+
+    match sparql.sparql_query_json(&query) {
+        Ok(body) => (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, SPARQL_RESULTS_JSON)],
+            body,
+        )
+            .into_response(),
+        Err(err @ (SparqlError::Parse(_) | SparqlError::Evaluation(_) | SparqlError::UnsupportedGraphResult)) => {
+            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+        }
+        Err(err @ SparqlError::Serialize(_)) => {
+            tracing::error!(error = %err, "failed to serialize SPARQL results");
+            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+        }
     }
 }
 
@@ -379,5 +534,236 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let parsed: CatalogListResponse = serde_json::from_slice(&body).unwrap();
         assert!(parsed.catalogs.is_empty());
+    }
+
+    // --- `/sparql` (gap analysis §3.3) --------------------------------------
+
+    /// `AppState` wired the way `main.rs` wires it once
+    /// `CRAWLER_CONFIG_PATH` is set: a real Oxigraph-backed cache, with
+    /// `AppState::sparql` pointed at that same store so `/sparql` is live.
+    fn sparql_test_state() -> AppState {
+        let store = Arc::new(rdf_store::oxigraph_backend::OxigraphCatalogCache::in_memory().unwrap());
+        let cache: Arc<dyn CatalogCache> = store.clone();
+        AppState::new(cache).with_sparql(Some(store))
+    }
+
+    /// A small but real per-participant catalog - same shape as
+    /// `seed_sample_catalog`'s fixture (one dataset, one distribution, one
+    /// data service), parameterized by origin node so two distinct
+    /// participants' worth of real, differently-shaped data can be seeded
+    /// side by side, which is what the SPARQL tests below need to prove a
+    /// query genuinely spans more than one harvested participant.
+    fn participant_catalog(node_id: &str, catalog_id: &str, dataset_id: &str) -> Catalog {
+        let mut catalog = Catalog::new(catalog_id, NodeId::new(node_id));
+        catalog.participant_id = Some(format!("did:example:{node_id}"));
+        let service_id = format!("{dataset_id}-svc");
+        catalog.datasets.push(Dataset {
+            id: dataset_id.to_string(),
+            properties: Default::default(),
+            distributions: vec![Distribution {
+                format: "application/json".to_string(),
+                access_service: service_id.clone(),
+            }],
+        });
+        catalog.data_services.push(DataService {
+            id: service_id,
+            endpoint_url: format!("https://{node_id}.example.org/dsp"),
+            endpoint_description: Some("dataspace-protocol-http:1.0".to_string()),
+        });
+        catalog
+    }
+
+    /// The real end-to-end path this gap analysis item asks for: two
+    /// seeded origin nodes, a real SPARQL SELECT sent through the actual
+    /// `GET /sparql` HTTP route (not `OxigraphCatalogCache::sparql_query_json`
+    /// called directly), and assertions on the real parsed
+    /// `application/sparql-results+json` body - proving GET, the default
+    /// whole-store scope, the real Oxigraph evaluator, and the real JSON
+    /// serialization all actually work together through the router.
+    #[tokio::test]
+    async fn sparql_get_select_finds_datasets_from_both_seeded_participants() {
+        let state = sparql_test_state();
+        state
+            .cache
+            .upsert(participant_catalog("node-a", "cat-a", "DATASET-A"))
+            .await
+            .unwrap();
+        state
+            .cache
+            .upsert(participant_catalog("node-b", "cat-b", "DATASET-B"))
+            .await
+            .unwrap();
+
+        let app = build_router(state);
+        let query = "PREFIX dcat: <http://www.w3.org/ns/dcat#> \
+                     SELECT ?dataset WHERE { ?dataset a dcat:Dataset }";
+        let uri = format!("/sparql?query={}", urlencoding::encode(query));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("Accept", "application/sparql-results+json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            "application/sparql-results+json"
+        );
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["head"]["vars"], serde_json::json!(["dataset"]));
+        let bindings = parsed["results"]["bindings"].as_array().unwrap();
+        assert_eq!(bindings.len(), 2, "expected one dataset per seeded participant, got {parsed}");
+        let mut dataset_iris: Vec<&str> =
+            bindings.iter().map(|b| b["dataset"]["value"].as_str().unwrap()).collect();
+        dataset_iris.sort_unstable();
+        assert!(dataset_iris[0].contains("node-a") && dataset_iris[0].contains("DATASET-A"));
+        assert!(dataset_iris[1].contains("node-b") && dataset_iris[1].contains("DATASET-B"));
+        assert_eq!(bindings[0]["dataset"]["type"], serde_json::json!("uri"));
+    }
+
+    /// The other mandated submission mechanism: `POST` with
+    /// `application/x-www-form-urlencoded` and a `query` form field (see
+    /// `sparql_route_post`'s doc comment for why this style was chosen
+    /// over raw `application/sparql-query` bodies). Same real end-to-end
+    /// path and assertions as the GET test above.
+    #[tokio::test]
+    async fn sparql_post_form_encoded_select_finds_seeded_dataset() {
+        let state = sparql_test_state();
+        state
+            .cache
+            .upsert(participant_catalog("node-a", "cat-a", "DATASET-A"))
+            .await
+            .unwrap();
+
+        let app = build_router(state);
+        let query = "PREFIX dcat: <http://www.w3.org/ns/dcat#> \
+                     SELECT ?dataset WHERE { ?dataset a dcat:Dataset }";
+        let form_body = format!("query={}", urlencoding::encode(query));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/sparql")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from(form_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let bindings = parsed["results"]["bindings"].as_array().unwrap();
+        assert_eq!(bindings.len(), 1);
+        assert!(bindings[0]["dataset"]["value"].as_str().unwrap().contains("DATASET-A"));
+    }
+
+    /// A real SPARQL ASK, through the HTTP route, producing the
+    /// spec-shaped `{"head":{},"boolean":true}` body.
+    #[tokio::test]
+    async fn sparql_get_ask_returns_true_over_http() {
+        let state = sparql_test_state();
+        state
+            .cache
+            .upsert(participant_catalog("node-a", "cat-a", "DATASET-A"))
+            .await
+            .unwrap();
+
+        let app = build_router(state);
+        let query = "PREFIX dcat: <http://www.w3.org/ns/dcat#> ASK { ?d a dcat:Dataset }";
+        let uri = format!("/sparql?query={}", urlencoding::encode(query));
+        let response = app
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed, serde_json::json!({"head": {}, "boolean": true}));
+    }
+
+    /// The in-memory backend (no `CRAWLER_CONFIG_PATH`, `AppState::sparql`
+    /// is `None`) has no SPARQL capability at all - `/sparql` must say so
+    /// plainly (501), not 404 (the route exists) and not pretend to
+    /// answer.
+    #[tokio::test]
+    async fn sparql_endpoint_returns_501_when_no_oxigraph_backend_is_configured() {
+        let app = build_router(test_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sparql?query=ASK%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn sparql_endpoint_requires_a_query_parameter() {
+        let app = build_router(sparql_test_state());
+        let response = app
+            .oneshot(Request::builder().uri("/sparql").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// `Accept` demanding a representation this endpoint doesn't produce
+    /// is 406, not a silent fallback to JSON anyway.
+    #[tokio::test]
+    async fn sparql_endpoint_rejects_an_unacceptable_accept_header() {
+        let app = build_router(sparql_test_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sparql?query=ASK%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D")
+                    .header("Accept", "text/html")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE);
+    }
+
+    /// A SPARQL Update sent to this read-only endpoint must be rejected,
+    /// and must not mutate the store - the real proof (through HTTP, not
+    /// a direct backend call) that this product's "read-only, never
+    /// originates data" rule actually holds at the surface a caller would
+    /// use.
+    #[tokio::test]
+    async fn sparql_endpoint_rejects_an_update_operation_and_leaves_the_store_unchanged() {
+        let state = sparql_test_state();
+        state
+            .cache
+            .upsert(participant_catalog("node-a", "cat-a", "DATASET-A"))
+            .await
+            .unwrap();
+        let cache_handle = state.cache.clone();
+
+        let app = build_router(state);
+        let injection = "PREFIX dcat: <http://www.w3.org/ns/dcat#> \
+                          INSERT DATA { GRAPH <urn:x> { <urn:y> a dcat:Catalog } }";
+        let uri = format!("/sparql?query={}", urlencoding::encode(injection));
+        let response = app
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let results = cache_handle.query(CatalogQuery::all()).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "cat-a");
     }
 }

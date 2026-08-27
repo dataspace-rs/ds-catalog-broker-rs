@@ -67,11 +67,21 @@ request, because there is no such request in DSP.
 
 **This product's only two serving surfaces are non-DSP:**
 
-- A **dataset list per participant** (today: `GET /catalog?node_id=`,
-  an internal Management-API-style endpoint — see the gap analysis for
-  whether that's the final shape).
-- A **SPARQL endpoint** over the whole semantic cache, for ad hoc search
-  across everything harvested. **Not built yet** — see the gap analysis.
+- A **dataset list per participant**: `GET /catalog?node_id=`, an
+  internal Management-API-style endpoint. The gap analysis (§3.1)
+  weighed redesigning this path (e.g. `GET /participants/{id}/datasets`)
+  now that it's a first-class serving surface rather than a
+  pre-crawler-era stub, and decided to keep it as-is — see that section
+  for the reasoning.
+- A **SPARQL endpoint**, `GET`/`POST /sparql`, over the whole semantic
+  cache (all named graphs, by default), for ad hoc search across
+  everything harvested — following the SPARQL 1.1 Protocol closely
+  enough for standard tooling (`query` via GET query string or POST
+  form-encoded body, `Accept`-negotiated `application/sparql-results+json`,
+  read-only by construction), and only available when this connector is
+  running the Oxigraph-backed cache. See the gap analysis §3.3 and
+  `rdf_store::oxigraph_backend::OxigraphCatalogCache::sparql_query_json`'s
+  doc comment for the full contract.
 
 **It deliberately does not implement a DSP catalog-serving endpoint at
 all.** Answering `CatalogRequestMessage` — including presenting *this*
@@ -126,12 +136,10 @@ top), but as separate Rust crates rather than Java SPI modules:
   DSP-response parser tolerant of real Eclipse EDC's JSON-LD shape, not
   just this project's own.
 - `ds-catalog-broker-rs` — this product's own HTTP surface (crate/binary
-  name; `crates/http-api` until this project's rebrand). Today it also exposes a
-  DSP catalog-serving endpoint left over from before this product's
-  scope was corrected to the Catalog Broker role above — see the gap
-  analysis for exactly what's being removed and what's replacing it (a
-  dataset-list endpoint, which already exists in a different shape, and
-  a SPARQL endpoint, which doesn't exist yet).
+  name; `crates/http-api` until this project's rebrand): `GET /catalog`
+  (dataset list per participant), `GET`/`POST /sparql` (the SPARQL
+  endpoint), and the DCP holder routes. The DSP catalog-serving endpoint
+  that used to live here has been removed per the gap analysis §1.
 
 ## Relationship to the `dataspace` study repo
 
@@ -169,15 +177,16 @@ crawled data is expected to be repopulated on every restart, not durably
 stored. With no harvester configured, `ds-catalog-broker-rs` falls back to a plain
 `InMemoryCatalogCache` (a bare `HashMap`, not RDF-backed at all).
 
-**Not yet a real triple store.** Today it's still a "first cut" JSON-blob
-bridge: one named graph per origin node, one triple per graph, carrying
-the whole crawled `Catalog` as an opaque JSON literal. That's fine for
-"does this origin node exist" but cannot support the SPARQL-search
-surface this product is supposed to have — you cannot meaningfully query
-dataset properties, formats, or policies against one big JSON string.
-Real decomposition into `Dataset`/`Offer`/`Distribution`/`DataService`
-triples (reusing DCAT/ODRL vocabulary, matching what DSP itself reuses)
-is required, not optional, follow-up work — see the gap analysis.
+**A real triple store, not a JSON-blob bridge.** Past the original
+"first cut" (one opaque `catalogJson` literal per named graph),
+`OxigraphCatalogCache` now decomposes each crawled `Catalog` into real
+DCAT-based triples (`dcat:Catalog`/`dcat:Dataset`/`dcat:Distribution`/
+`dcat:DataService`, `dct:format`, ...) per named graph, so dataset
+properties, formats, and distribution/service links are genuinely
+SPARQL-queryable — see `rdf_store::oxigraph_backend`'s own module doc for
+the exact mapping (gap analysis §3.2). No ODRL `Offer`/`Policy` triples
+are emitted yet, since `catalog-core::Dataset` has no such field to
+derive them from (gap analysis §3.4, still open).
 
 ![Internal architecture of the semantic cache: crawler parses a crawled catalog into a domain value, upserts it through the CatalogCache trait, OxigraphCatalogCache stores one named graph per origin node, and the two serving surfaces read from it - today limited by the JSON-blob-per-graph gap](docs/diagrams/semantic-cache-architecture.svg)
 
@@ -192,12 +201,13 @@ this README used to describe as scope creep (`POST /dsp/catalog/request`,
 that protected it) has since been removed, per
 **[`docs/gap-analysis-2026-08-27.md`](docs/gap-analysis-2026-08-27.md)**
 §1 — `ds-catalog-broker-rs` no longer answers `CatalogRequestMessage`s at
-all. What's genuinely missing is real work, not just deletion: real RDF
-decomposition of the semantic cache (today it's still a JSON-blob bridge,
-see below), the SPARQL endpoint, and honoring upstream ODRL policies —
-see that same document's §3 for the concrete punch list, and §2 for what
-was already correctly scoped and untouched (the crawl engine and the DCP
-*holder* role).
+all. Real RDF decomposition of the semantic cache (§3.2) and the SPARQL
+endpoint (§3.3) have since landed too, and §3.1 (the dataset-list
+endpoint's shape) has been settled (kept as-is). What's still genuinely
+missing: honoring upstream ODRL policies (§3.4) — see that same
+document's §3 for the concrete punch list, and §2 for what was already
+correctly scoped and untouched (the crawl engine and the DCP *holder*
+role).
 
 ## Vendored dependencies
 
