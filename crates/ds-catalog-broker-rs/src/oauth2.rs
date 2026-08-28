@@ -215,9 +215,22 @@ impl OAuth2Verifier {
         validation.validate_nbf = true;
         if let Some(issuer) = &self.config.issuer {
             validation.set_issuer(&[issuer]);
+            // `jsonwebtoken`'s own `validate()` only compares `iss` when the
+            // claim is *present* on the token - a token that omits `iss`
+            // entirely otherwise falls through unchecked even with an
+            // expected issuer configured (verified against
+            // `validation.rs`'s `(claims.iss, options.iss.as_ref())` match:
+            // the only failing arms require `TryParse::Parsed`). Requiring
+            // the claim closes that bypass: configuring `OAUTH2_ISSUER`
+            // must mean every accepted token actually carries a matching
+            // `iss`, not "carries one if it happens to have one at all".
+            validation.required_spec_claims.insert("iss".to_string());
         }
         if let Some(audience) = &self.config.audience {
             validation.set_audience(&[audience]);
+            // Same bypass, same fix, for `aud` - see the `iss` comment
+            // above.
+            validation.required_spec_claims.insert("aud".to_string());
         } else {
             // `jsonwebtoken`'s `Validation` otherwise rejects *any* token
             // that merely carries an `aud` claim once `validate_aud`
@@ -664,6 +677,49 @@ mod tests {
             verifier.verify(&token).is_ok(),
             "matching audience must be accepted"
         );
+    }
+
+    /// Real bypass, distinct from the "wrong audience" case above:
+    /// `jsonwebtoken`'s own `validate()` only compares `aud` when the claim
+    /// is *present* on the token (`(TryParse::Parsed(_), Some(_))` is the
+    /// only branch that can fail; a token with no `aud` claim at all falls
+    /// through to the catch-all `_ => {}` and passes). So a validly-signed
+    /// token that simply omits `aud` bypasses `OAUTH2_AUDIENCE` entirely,
+    /// even though the operator configured it specifically to restrict
+    /// which audience's tokens this resource server accepts. `iss`
+    /// configured must likewise force the `iss` claim to be present.
+    #[tokio::test]
+    async fn verify_rejects_a_token_with_no_aud_claim_at_all_when_audience_is_configured() {
+        let key = generate_key("key-1");
+        let jwks_uri = spawn_jwks(json!({"keys": [ec_jwk(&key, None)]})).await;
+        let mut cfg = config(jwks_uri);
+        cfg.audience = Some("expected-audience".to_string());
+        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), cfg).await.expect("fetch JWKS");
+
+        // base_claims() carries no `aud` at all.
+        let token = sign_es256(&key, base_claims());
+        let err = verifier
+            .verify(&token)
+            .expect_err("a token with no aud claim at all must be rejected when an audience is configured");
+        assert!(matches!(err, VerifyError::InvalidToken(_)), "expected InvalidToken, got {err:?}");
+    }
+
+    /// Same bypass as above, for `iss`: a token with no `iss` claim at all
+    /// must not silently pass when `OAUTH2_ISSUER` is configured.
+    #[tokio::test]
+    async fn verify_rejects_a_token_with_no_iss_claim_at_all_when_issuer_is_configured() {
+        let key = generate_key("key-1");
+        let jwks_uri = spawn_jwks(json!({"keys": [ec_jwk(&key, None)]})).await;
+        let mut cfg = config(jwks_uri);
+        cfg.issuer = Some("https://expected-issuer.example".to_string());
+        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), cfg).await.expect("fetch JWKS");
+
+        // base_claims() carries no `iss` at all.
+        let token = sign_es256(&key, base_claims());
+        let err = verifier
+            .verify(&token)
+            .expect_err("a token with no iss claim at all must be rejected when an issuer is configured");
+        assert!(matches!(err, VerifyError::InvalidToken(_)), "expected InvalidToken, got {err:?}");
     }
 
     /// Regression guard for a real `jsonwebtoken` footgun: `Validation`
