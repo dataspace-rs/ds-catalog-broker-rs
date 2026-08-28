@@ -1,0 +1,63 @@
+name: CI
+
+# Quality gates + testing for the whole cargo workspace. Three independent
+# jobs (not one sequential pipeline) so each shows as its own required
+# check in a PR: fmt and clippy are fast-fail static gates, test is the
+# real correctness gate. All three need the vendored submodules
+# (vendor/contreforts-*) checked out - they're real workspace members
+# (see the root Cargo.toml's own comment on why), not an excluded nested
+# workspace, so `cargo fmt --all`/`cargo metadata` can't even resolve the
+# workspace without them present.
+
+on:
+  push:
+    branches: [ds-catalog-broker-rs]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # librocksdb-sys (pulled in via vendor/contreforts-kg's default
+      # "rocksdb" feature on oxigraph, see the root Cargo.toml's comment on
+      # rdf-store's dependency graph) builds RocksDB from source and needs
+      # a C++ toolchain - ubuntu-latest ships build-essential already, but
+      # clang/cmake are not guaranteed present on every runner image
+      # version, so they're installed explicitly rather than assumed.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang cmake
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang cmake
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
