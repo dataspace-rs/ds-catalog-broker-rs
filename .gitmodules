@@ -1,9 +1,9 @@
 [submodule "vendor/contreforts-kg"]
 	path = vendor/contreforts-kg
-	url = ssh://git@labs.deepthought-solutions.net:2222/contreforts/contreforts-kg.git
+	url = https://github.com/contreforts-ai/contreforts-kg.git
 [submodule "vendor/contreforts-core"]
 	path = vendor/contreforts-core
-	url = ssh://git@labs.deepthought-solutions.net:2222/contreforts/contreforts-core.git
+	url = https://github.com/contreforts-ai/contreforts-core.git
 [submodule "vendor/contreforts-config"]
 	path = vendor/contreforts-config
-	url = ssh://git@labs.deepthought-solutions.net:2222/contreforts/contreforts-config.git
+	url = https://github.com/contreforts-ai/contreforts-config.git
