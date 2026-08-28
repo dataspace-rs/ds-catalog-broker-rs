@@ -474,7 +474,6 @@ pub mod oxigraph_backend {
     use oxigraph::sparql::{QueryResults, SparqlEvaluator};
     use oxigraph::store::StorageError;
     use std::collections::BTreeMap;
-    use std::path::Path;
 
     const NODE_NS: &str = "https://federated-catalog-rs.internal/nodes/";
     const INTERNAL_NS: &str = "https://federated-catalog-rs.internal/ns#";
@@ -744,12 +743,6 @@ pub mod oxigraph_backend {
             Ok(Self { store })
         }
 
-        /// Open (or create) a persistent Oxigraph store at `path`.
-        pub fn open(path: impl AsRef<Path>) -> StoreResult<Self> {
-            let store = GraphStore::open(path)?;
-            Ok(Self { store })
-        }
-
         /// Quads matching the given pattern, always scoped to `graph` -
         /// every read this backend does is graph-scoped, so `graph` is a
         /// required parameter here rather than another `Option`.
@@ -791,7 +784,10 @@ pub mod oxigraph_backend {
             let term = self
                 .first_object(subject, &sequence_index_pred(), graph)?
                 .ok_or_else(|| {
-                    StoreError::Backend(format!("{} is missing fcns:sequenceIndex", subject.as_str()))
+                    StoreError::Backend(format!(
+                        "{} is missing fcns:sequenceIndex",
+                        subject.as_str()
+                    ))
                 })?;
             match term {
                 Term::Literal(lit) => lit
@@ -834,7 +830,12 @@ pub mod oxigraph_backend {
             let base = node_base(&catalog.origin_node);
             let catalog_node = catalog_iri(&base, &catalog.id);
 
-            self.insert(&catalog_node, &rdf_type(), &Term::from(dcat_catalog_class()), graph)?;
+            self.insert(
+                &catalog_node,
+                &rdf_type(),
+                &Term::from(dcat_catalog_class()),
+                graph,
+            )?;
 
             if let Some(participant_id) = &catalog.participant_id {
                 self.insert(
@@ -862,7 +863,12 @@ pub mod oxigraph_backend {
                     &Term::from(dataset_node.clone()),
                     graph,
                 )?;
-                self.insert(&dataset_node, &rdf_type(), &Term::from(dcat_dataset_class()), graph)?;
+                self.insert(
+                    &dataset_node,
+                    &rdf_type(),
+                    &Term::from(dcat_dataset_class()),
+                    graph,
+                )?;
                 self.insert(
                     &dataset_node,
                     &sequence_index_pred(),
@@ -923,7 +929,12 @@ pub mod oxigraph_backend {
                     &Term::from(service_node.clone()),
                     graph,
                 )?;
-                self.insert(&service_node, &rdf_type(), &Term::from(dcat_data_service_class()), graph)?;
+                self.insert(
+                    &service_node,
+                    &rdf_type(),
+                    &Term::from(dcat_data_service_class()),
+                    graph,
+                )?;
                 self.insert(
                     &service_node,
                     &sequence_index_pred(),
@@ -972,7 +983,8 @@ pub mod oxigraph_backend {
                     ));
                 }
             };
-            let catalog_id = strip_prefix_decode(catalog_subject.as_str(), &format!("{base}/catalogs/"))?;
+            let catalog_id =
+                strip_prefix_decode(catalog_subject.as_str(), &format!("{base}/catalogs/"))?;
 
             let participant_id = self
                 .first_object(&catalog_subject, &participant_id_pred(), graph)?
@@ -994,7 +1006,10 @@ pub mod oxigraph_backend {
                 if reserved_catalog_preds.contains(&quad.predicate) {
                     continue;
                 }
-                properties.insert(decode_property_key(&quad.predicate), term_as_string(&quad.object)?);
+                properties.insert(
+                    decode_property_key(&quad.predicate),
+                    term_as_string(&quad.object)?,
+                );
             }
 
             let mut dataset_entries = Vec::new();
@@ -1003,7 +1018,10 @@ pub mod oxigraph_backend {
                 dataset_entries.push(self.load_dataset(&base, &dataset_subject, graph)?);
             }
             dataset_entries.sort_by_key(|(index, _)| *index);
-            let datasets = dataset_entries.into_iter().map(|(_, dataset)| dataset).collect();
+            let datasets = dataset_entries
+                .into_iter()
+                .map(|(_, dataset)| dataset)
+                .collect();
 
             let mut service_entries = Vec::new();
             for quad in self.quads(Some(&catalog_subject), Some(&service_pred), None, graph)? {
@@ -1011,7 +1029,10 @@ pub mod oxigraph_backend {
                 service_entries.push(self.load_data_service(&base, &service_subject, graph)?);
             }
             service_entries.sort_by_key(|(index, _)| *index);
-            let data_services = service_entries.into_iter().map(|(_, service)| service).collect();
+            let data_services = service_entries
+                .into_iter()
+                .map(|(_, service)| service)
+                .collect();
 
             Ok(Some(Catalog {
                 id: catalog_id,
@@ -1037,7 +1058,11 @@ pub mod oxigraph_backend {
             for quad in self.quads(Some(subject), Some(&distribution_pred), None, graph)? {
                 let distribution_subject =
                     expect_named_node(quad.object, "a dcat:distribution reference")?;
-                distribution_entries.push(self.load_distribution(base, &distribution_subject, graph)?);
+                distribution_entries.push(self.load_distribution(
+                    base,
+                    &distribution_subject,
+                    graph,
+                )?);
             }
             distribution_entries.sort_by_key(|(index, _)| *index);
             let distributions = distribution_entries
@@ -1051,7 +1076,10 @@ pub mod oxigraph_backend {
                 if reserved.contains(&quad.predicate) {
                     continue;
                 }
-                properties.insert(decode_property_key(&quad.predicate), term_as_string(&quad.object)?);
+                properties.insert(
+                    decode_property_key(&quad.predicate),
+                    term_as_string(&quad.object)?,
+                );
             }
 
             Ok((
@@ -1082,14 +1110,23 @@ pub mod oxigraph_backend {
             let access_service_term = self
                 .first_object(subject, &dcat_access_service_pred(), graph)?
                 .ok_or_else(|| {
-                    StoreError::Backend(format!("{} is missing dcat:accessService", subject.as_str()))
+                    StoreError::Backend(format!(
+                        "{} is missing dcat:accessService",
+                        subject.as_str()
+                    ))
                 })?;
             let access_service_node =
                 expect_named_node(access_service_term, "dcat:accessService's object")?;
             let access_service =
                 strip_prefix_decode(access_service_node.as_str(), &format!("{base}/services/"))?;
 
-            Ok((index, Distribution { format, access_service }))
+            Ok((
+                index,
+                Distribution {
+                    format,
+                    access_service,
+                },
+            ))
         }
 
         fn load_data_service(
@@ -1322,9 +1359,10 @@ pub mod oxigraph_backend {
         fn rich_catalog() -> Catalog {
             let mut catalog = Catalog::new("cat-rich", NodeId::new("node-rich"));
             catalog.participant_id = Some("did:example:rich-participant".to_string());
-            catalog
-                .properties
-                .insert("http://www.w3.org/ns/dcat#keyword".to_string(), "logistics".to_string());
+            catalog.properties.insert(
+                "http://www.w3.org/ns/dcat#keyword".to_string(),
+                "logistics".to_string(),
+            );
             catalog
                 .properties
                 .insert("internalLabel".to_string(), "demo".to_string());
@@ -1486,7 +1524,8 @@ pub mod oxigraph_backend {
         /// catalog was one opaque literal object and no predicate other
         /// than `fcns:catalogJson` ever existed in the store.
         #[tokio::test]
-        async fn a_direct_quad_pattern_query_finds_a_distribution_format_by_its_real_dcat_predicate() {
+        async fn a_direct_quad_pattern_query_finds_a_distribution_format_by_its_real_dcat_predicate()
+         {
             let cache = cache();
             cache.upsert(rich_catalog()).await.unwrap();
 
@@ -1499,7 +1538,11 @@ pub mod oxigraph_backend {
                     &graph,
                 )
                 .unwrap();
-            assert_eq!(matches.len(), 1, "expected exactly one distribution with this format");
+            assert_eq!(
+                matches.len(),
+                1,
+                "expected exactly one distribution with this format"
+            );
 
             // And the subject that carries it really is a dcat:Distribution
             // reachable from ds-1 via the real dcat:distribution property -
@@ -1541,7 +1584,10 @@ pub mod oxigraph_backend {
                     node_iri(&NodeId::new("node-rich")).as_str()
                 ))
                 .unwrap();
-            assert!(found, "expected the real dcat:dataset/distribution/accessService chain to be queryable");
+            assert!(
+                found,
+                "expected the real dcat:dataset/distribution/accessService chain to be queryable"
+            );
         }
 
         /// A property whose key is already a real vocabulary IRI is stored
@@ -1555,7 +1601,9 @@ pub mod oxigraph_backend {
 
             let graph = node_iri(&NodeId::new("node-rich"));
             let keyword_pred = iri("http://www.w3.org/ns/dcat#keyword");
-            let matches = cache.quads(None, Some(&keyword_pred), None, &graph).unwrap();
+            let matches = cache
+                .quads(None, Some(&keyword_pred), None, &graph)
+                .unwrap();
             assert_eq!(matches.len(), 1);
             assert_eq!(term_as_string(&matches[0].object).unwrap(), "logistics");
         }
@@ -1590,7 +1638,10 @@ pub mod oxigraph_backend {
             let leaked_old_dataset = all_quads.iter().any(|q| {
                 matches!(&q.subject, NamedOrBlankNode::NamedNode(n) if n.as_str().contains("ds-1") || n.as_str().contains("ds-2"))
             });
-            assert!(!leaked_old_dataset, "old catalog's dataset triples must not survive a wholesale upsert");
+            assert!(
+                !leaked_old_dataset,
+                "old catalog's dataset triples must not survive a wholesale upsert"
+            );
         }
 
         // --- `sparql_query_json` (gap analysis §3.3) --------------------------
@@ -1621,7 +1672,11 @@ pub mod oxigraph_backend {
 
             assert_eq!(parsed["head"]["vars"], serde_json::json!(["catalog"]));
             let bindings = parsed["results"]["bindings"].as_array().unwrap();
-            assert_eq!(bindings.len(), 2, "expected one dcat:Catalog per origin node, got {parsed}");
+            assert_eq!(
+                bindings.len(),
+                2,
+                "expected one dcat:Catalog per origin node, got {parsed}"
+            );
             let mut catalog_iris: Vec<&str> = bindings
                 .iter()
                 .map(|b| b["catalog"]["value"].as_str().unwrap())
@@ -1659,7 +1714,12 @@ pub mod oxigraph_backend {
             let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             let bindings = parsed["results"]["bindings"].as_array().unwrap();
             assert_eq!(bindings.len(), 1);
-            assert!(bindings[0]["catalog"]["value"].as_str().unwrap().contains("node-b"));
+            assert!(
+                bindings[0]["catalog"]["value"]
+                    .as_str()
+                    .unwrap()
+                    .contains("node-b")
+            );
         }
 
         /// A real `ASK` query, through the same HTTP-facing method,
@@ -1686,7 +1746,10 @@ pub mod oxigraph_backend {
         #[tokio::test]
         async fn sparql_update_operation_is_rejected_not_silently_ignored() {
             let cache = cache();
-            cache.upsert(sample_catalog("node-1", "cat-1")).await.unwrap();
+            cache
+                .upsert(sample_catalog("node-1", "cat-1"))
+                .await
+                .unwrap();
 
             let attempted_injection = format!(
                 "PREFIX dcat: <{DCAT_NS}> INSERT DATA {{ GRAPH <{}> {{ <urn:x> a dcat:Catalog }} }}",
@@ -1712,7 +1775,10 @@ pub mod oxigraph_backend {
         #[tokio::test]
         async fn sparql_query_json_rejects_construct_queries_cleanly() {
             let cache = cache();
-            cache.upsert(sample_catalog("node-1", "cat-1")).await.unwrap();
+            cache
+                .upsert(sample_catalog("node-1", "cat-1"))
+                .await
+                .unwrap();
 
             let outcome = cache.sparql_query_json("CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }");
             assert!(matches!(outcome, Err(SparqlError::UnsupportedGraphResult)));
