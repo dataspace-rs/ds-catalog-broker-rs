@@ -193,13 +193,12 @@ mod tests {
         id = "participant-a"
         name = "Participant A"
         catalog_request_url = "http://127.0.0.1:19001/dsp/catalog/request"
-        requires_dcp = false
 
         [[participants]]
         id = "gated-participant"
         name = "DCP-gated participant"
         catalog_request_url = "http://127.0.0.1:19002/dsp/catalog/request"
-        requires_dcp = true
+        credential_protocol = "dcp"
         provider_did = "did:web:localhost%3A19002:dsp"
 
         [holder]
@@ -222,11 +221,12 @@ mod tests {
             a.catalog_request_url,
             "http://127.0.0.1:19001/dsp/catalog/request"
         );
-        assert!(!a.requires_dcp);
+        assert!(matches!(a.credential_protocol, CredentialProtocol::None));
         assert!(a.provider_did.is_none());
+        assert!(a.oid4vp_response_uri.is_none());
 
         let gated = &config.participants[1];
-        assert!(gated.requires_dcp);
+        assert!(matches!(gated.credential_protocol, CredentialProtocol::Dcp));
         assert_eq!(
             gated.provider_did.as_deref(),
             Some("did:web:localhost%3A19002:dsp")
@@ -243,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn a_participant_without_dcp_needs_no_provider_did_or_holder_section() {
+    fn a_participant_with_no_credential_protocol_field_defaults_to_none_and_needs_nothing_else() {
         let raw = r#"
             interval_secs = 60
 
@@ -251,14 +251,14 @@ mod tests {
             id = "open-participant"
             name = "Open participant"
             catalog_request_url = "http://127.0.0.1:19001/dsp/catalog/request"
-            requires_dcp = false
         "#;
         let config = ParticipantsConfig::parse(raw, "test.toml").expect("should parse");
+        assert!(matches!(config.participants[0].credential_protocol, CredentialProtocol::None));
         assert!(config.holder.is_none());
     }
 
     #[test]
-    fn rejects_requires_dcp_without_provider_did() {
+    fn rejects_dcp_without_provider_did() {
         let raw = r#"
             interval_secs = 60
 
@@ -266,7 +266,7 @@ mod tests {
             id = "gated-participant"
             name = "DCP-gated participant"
             catalog_request_url = "http://127.0.0.1:19002/dsp/catalog/request"
-            requires_dcp = true
+            credential_protocol = "dcp"
 
             [holder]
             own_did_host = "localhost:19100"
@@ -281,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_requires_dcp_without_holder_section() {
+    fn rejects_dcp_without_holder_section() {
         let raw = r#"
             interval_secs = 60
 
@@ -289,12 +289,78 @@ mod tests {
             id = "gated-participant"
             name = "DCP-gated participant"
             catalog_request_url = "http://127.0.0.1:19002/dsp/catalog/request"
-            requires_dcp = true
+            credential_protocol = "dcp"
             provider_did = "did:web:localhost%3A19002:dsp"
         "#;
         let err = ParticipantsConfig::parse(raw, "test.toml").expect_err("should reject");
         match err {
             ConfigError::MissingHolderSection { id } => assert_eq!(id, "gated-participant"),
+            other => panic!("expected MissingHolderSection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_an_oid4vp_participant_with_response_uri_set() {
+        let raw = r#"
+            interval_secs = 60
+
+            [[participants]]
+            id = "oid4vp-participant"
+            name = "OID4VP-gated participant"
+            catalog_request_url = "http://127.0.0.1:19003/dsp/catalog/request"
+            credential_protocol = "oid4vp"
+            oid4vp_response_uri = "http://127.0.0.1:19003/oid4vp/response"
+
+            [holder]
+            own_did_host = "localhost:19100"
+            credential_jws = "header.payload.signature"
+            required_scope = "some-scope"
+        "#;
+        let config = ParticipantsConfig::parse(raw, "test.toml").expect("should parse");
+        let p = &config.participants[0];
+        assert!(matches!(p.credential_protocol, CredentialProtocol::Oid4Vp));
+        assert_eq!(p.oid4vp_response_uri.as_deref(), Some("http://127.0.0.1:19003/oid4vp/response"));
+        assert!(p.provider_did.is_none());
+    }
+
+    #[test]
+    fn rejects_oid4vp_without_response_uri() {
+        let raw = r#"
+            interval_secs = 60
+
+            [[participants]]
+            id = "oid4vp-participant"
+            name = "OID4VP-gated participant"
+            catalog_request_url = "http://127.0.0.1:19003/dsp/catalog/request"
+            credential_protocol = "oid4vp"
+
+            [holder]
+            own_did_host = "localhost:19100"
+            credential_jws = "header.payload.signature"
+            required_scope = "some-scope"
+        "#;
+        let err = ParticipantsConfig::parse(raw, "test.toml").expect_err("should reject");
+        match err {
+            ConfigError::MissingOid4VpResponseUri { id } => assert_eq!(id, "oid4vp-participant"),
+            other => panic!("expected MissingOid4VpResponseUri, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_oid4vp_without_holder_section() {
+        let raw = r#"
+            interval_secs = 60
+
+            [[participants]]
+            id = "oid4vp-participant"
+            name = "OID4VP-gated participant"
+            catalog_request_url = "http://127.0.0.1:19003/dsp/catalog/request"
+            credential_protocol = "oid4vp"
+            oid4vp_response_uri = "http://127.0.0.1:19003/oid4vp/response"
+        "#;
+        let err = ParticipantsConfig::parse(raw, "test.toml").expect_err("should reject");
+        match err {
+            ConfigError::MissingHolderSection { id } => assert_eq!(id, "oid4vp-participant"),
             other => panic!("expected MissingHolderSection, got {other:?}"),
         }
     }
