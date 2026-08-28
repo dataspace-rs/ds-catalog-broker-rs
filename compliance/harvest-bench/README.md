@@ -20,9 +20,10 @@ brief.
 - `participants.toml` - `crates/crawler` config pointing at the same two
   participants (`requires_dcp = false`, `interval_secs = 5`).
 - `catalog-request.k6.js` - the load-test script, generalized from
-  `../benchmark-2026-08-27.md`'s own (adds a `BODY` env var so the same
-  script drives EDC's Management API `v3/catalogs/request` and this
-  project's DSP `catalog/request`).
+  `../benchmark-2026-08-27.md`'s own (adds `METHOD`/`BODY` env vars so the
+  same script drives EDC's Management API `POST v3/catalogs/request` and
+  this project's own `GET /catalog` - it no longer serves a DSP catalog
+  endpoint at all, see the report's DSP-serving-removal note).
 - `sample-rss-cpu.sh` - the 1s-interval `/proc` RSS/CPU sampler, same
   method as `../benchmark-2026-08-27.md` / `../benchmark-dcp-2026-08-27.md`.
 - `check_catalog.py` - correctness check: queries either system's

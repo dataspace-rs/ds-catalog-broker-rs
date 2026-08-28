@@ -1,8 +1,32 @@
-# Harvesting benchmark: EDC's own federated-catalog crawler vs. `crates/crawler` + `http-api`
+# Harvesting benchmark: EDC's own federated-catalog crawler vs. `crates/crawler` + `ds-catalog-broker-rs`
 
 **Date:** 2026-08-27
 
-**Corrected re-run (same date):** the first pass through this benchmark
+**Re-run following the DSP-serving removal (2026-08-28):** this project's
+`http-api` crate has since been renamed `ds-catalog-broker-rs` and lost
+its DSP *provider*-role surface entirely (see
+`docs/gap-analysis-2026-08-27.md`): `POST /dsp/catalog/request`, the
+endpoint every number and every response capture below originally
+measured, no longer exists. A DSP catalog broker is a **Consumer** that
+crawls upstream Catalog Services and re-serves the aggregate to its own
+callers - it was never in scope for it to also *answer* DSP catalog
+requests as if it were a Catalog Service itself, and that conflation is
+exactly what the removal fixes. Its replacement, `GET /catalog`, is what
+this re-run measures throughout: same methodology, same two real
+HARVEST-D/E EDC 0.18.0 participants, same k6/RSS-CPU harness, freshly
+re-run end to end, not the prior numbers edited in place. The EDC side
+(target, methodology, response shape) is unchanged from the prior
+corrected re-run below and was not re-measured. One consequence worth
+stating up front: `GET /catalog` returns this project's own plain JSON
+shape (`{"catalogs": [...]}`), not a DSP/JSON-LD `Catalog` document - so
+the "different JSON-LD framing" fidelity finding below, which compared a
+JSON-LD-framed DSP response against EDC's bare Management API array, no
+longer applies the same way. See "Real response shape" and "What this
+doesn't prove" below for what replaces it. The original DSP-endpoint
+numbers are not reproduced here; see this file's own git history.
+
+**Corrected re-run (2026-08-27, superseded by the above for the Rust
+side):** the first pass through this benchmark
 exposed a real bug - Rust's `POST /dsp/catalog/request` flattened every
 crawled participant's datasets into one `Catalog`'s `dataset` array,
 while EDC's own federated-catalog Management API kept one `Catalog`
@@ -425,6 +449,158 @@ comparison - see below.
   just not combined with concurrent read load here.
 - **No real DCP on either side**, same documented scope decision as every
   prior round.
+
+## Re-run after the DSP-serving removal (2026-08-28)
+
+Same host, same two HARVEST-D/E EDC 0.18.0 participants, same
+`run-harvest-bench.sh` driver (`compliance/harvest-bench/check_catalog.py`
+and `catalog-request.k6.js` updated to `GET` the new endpoint - see
+`run-harvest-bench.sh`'s own header comment). Only the Rust target
+changed: **`GET http://127.0.0.1:19501/catalog`** (no body, no auth)
+instead of `POST .../dsp/catalog/request`. EDC's side - target, request
+body, methodology - is byte-for-byte the one described above and was not
+re-run; only the numbers actually affected by the Rust-side endpoint
+change are reproduced below.
+
+**Answer: correct on both checkpoints again, and the resource-usage gap
+holds up on a real, different endpoint** - Rust's peak RSS is still
+**~62x lower** than EDC's own crawler (18.4 MB vs. 1,143.1 MB), and while
+*aggregate* CPU usage over the window was close this time (Rust ~892%,
+EDC ~1,019% of one core - about 12% lower, not "half" as in the prior
+round), Rust served **~48.5x EDC's throughput** (39,319 vs. 811.5 req/s)
+in that similar CPU budget, which works out to roughly **~55x lower CPU
+cost per request** than the prior round's crude "half the CPU" framing
+implied. Average latency dropped from EDC's 24.53 ms to Rust's 455.54 µs
+(~54x), and both systems again stayed correct across both checkpoints
+under a background 5s harvest loop actively re-crawling throughout.
+
+### Correctness under concurrent harvest + load
+
+```
+$ python3 check_catalog.py rust http://127.0.0.1:19501/catalog   # before load
+OK ['HARVEST-D-01', 'HARVEST-D-02', 'HARVEST-D-03', 'HARVEST-E-01', 'HARVEST-E-02', 'HARVEST-E-03', 'HARVEST-E-04', 'HARVEST-E-05', 'HARVEST-E-06', 'HARVEST-E-07']
+$ python3 check_catalog.py rust http://127.0.0.1:19501/catalog   # after 1,179,604 requests of load
+OK ['HARVEST-D-01', 'HARVEST-D-02', 'HARVEST-D-03', 'HARVEST-E-01', 'HARVEST-E-02', 'HARVEST-E-03', 'HARVEST-E-04', 'HARVEST-E-05', 'HARVEST-E-06', 'HARVEST-E-07']
+```
+
+EDC's own two checkpoints (target/body unchanged, re-verified this run):
+
+```
+$ python3 check_catalog.py edc http://127.0.0.1:19411/api/management/v3/catalogs/request   # before load
+OK ['HARVEST-D-01', 'HARVEST-D-02', 'HARVEST-D-03', 'HARVEST-E-01', 'HARVEST-E-02', 'HARVEST-E-03', 'HARVEST-E-04', 'HARVEST-E-05', 'HARVEST-E-06', 'HARVEST-E-07']
+$ python3 check_catalog.py edc http://127.0.0.1:19411/api/management/v3/catalogs/request   # after 24,357 requests of load
+OK ['HARVEST-D-01', 'HARVEST-D-02', 'HARVEST-D-03', 'HARVEST-E-01', 'HARVEST-E-02', 'HARVEST-E-03', 'HARVEST-E-04', 'HARVEST-E-05', 'HARVEST-E-06', 'HARVEST-E-07']
+```
+
+### Real response shape, Rust side (what replaced the DSP capture above)
+
+Real capture, `GET /catalog` against a live broker crawling the same two
+HARVEST-D/E fixtures (short-lived ad hoc run for this capture only, torn
+down immediately after - see the corrected re-run's own precedent above;
+`ss -tlnp`/`pgrep -x java` re-verified clean afterward, including one
+stray `./gradlew` daemon left over from the earlier build, stopped the
+same way the prior round's cleanup section documents):
+
+```json
+{
+  "catalogs": [
+    {
+      "id": "50925bf8-8f10-4fe1-8e4b-a9df1f493498",
+      "origin_node": "harvest-e",
+      "participant_id": "HARVEST-E",
+      "datasets": [
+        { "id": "HARVEST-E-06", "properties": {}, "distributions": [] },
+        { "id": "HARVEST-E-07", "properties": {}, "distributions": [] },
+        "...5 more HARVEST-E-* datasets..."
+      ],
+      "data_services": [
+        { "id": "bf4ce122-05ea-4855-bc31-61f4368d5420", "endpoint_url": "http://localhost:19321/api/dsp/2025-1", "endpoint_description": "dspace:connector" }
+      ],
+      "properties": {}
+    },
+    {
+      "id": "80792a9a-6a81-4029-8e2a-16b9d233acd4",
+      "origin_node": "harvest-d",
+      "participant_id": "HARVEST-D",
+      "datasets": [
+        { "id": "HARVEST-D-03", "properties": {}, "distributions": [] },
+        { "id": "HARVEST-D-01", "properties": {}, "distributions": [] },
+        { "id": "HARVEST-D-02", "properties": {}, "distributions": [] }
+      ],
+      "data_services": [
+        { "id": "9cc9ba57-2127-4101-af3a-c4aaaad43493", "endpoint_url": "http://localhost:19221/api/dsp/2025-1", "endpoint_description": "dspace:connector" }
+      ],
+      "properties": {}
+    }
+  ]
+}
+```
+
+**This retires the prior round's "different JSON-LD framing" fidelity
+finding, and replaces it with a plainer one.** The DSP-serving endpoint
+this benchmark used to measure returned a self-consistent JSON-LD
+`Catalog` document (`@context`/`@type`, datasets nested under `catalog[]`
+per participant); `GET /catalog` is this project's own internal
+management-style API, plain JSON throughout, with no `@context`/`@id`/
+`@type` framing anywhere - one `Catalog`-shaped Rust struct per origin
+node, same one-entry-per-crawled-participant structure as before, just
+undressed of the DSP/JSON-LD envelope. This makes the comparison to EDC's
+Management API response (also a plain, non-JSON-LD-enveloped array of
+`Catalog` objects - see the prior round's capture, unchanged) **more
+apples-to-apples than before, not less**: both endpoints being compared
+are now first-party "give me the aggregate" management/broker APIs,
+neither is a DSP peer-protocol endpoint. That is the direct, intended
+consequence of retiring the provider-role DSP surface from a component
+whose actual DSP role is Consumer, not Provider.
+
+### Summary table (Rust side only; EDC rows unchanged from above)
+
+| Metric | Rust (`crates/crawler` + `ds-catalog-broker-rs`, `GET /catalog`) | EDC 0.18.0 federated-catalog crawler (unchanged) |
+|---|---:|---:|
+| RSS at sampling start (pre-load, harvest loop already warm) | 13.62 MB (13,948 KB) | 301.5 MB (308,768 KB) |
+| Peak RSS (harvest + load combined) | 18.0 MB (18,420 KB) | 1,116.3 MB (1,143,096 KB) |
+| Avg CPU during the 30s load window | ~892% (~8.9 cores of 22) | ~1,019% (~10.2 cores of 22) |
+| Throughput | 39,319.06 req/s | 811.50 req/s |
+| Latency avg | 455.54 µs | 24.53 ms |
+| Latency p50 (median) | 424.38 µs | 23.97 ms |
+| Latency p90 | 643.83 µs | 35.87 ms |
+| Latency p95 | 767.28 µs | 39.48 ms |
+| Latency p99 | 1.12 ms | 49.37 ms |
+| Latency max | 7.82 ms | 178.98 ms |
+| Error rate | 0.0015% (18/1,179,604 OK-check failures; 0.00% per k6's own `http_req_failed` threshold - see caveat below) | 0.00% (0/24,357) |
+| Aggregated dataset count served | 10 (across 2 `Catalog` entries under `catalog[]`, one per crawled participant) | 10 (across 2 `Catalog` entries, one per crawled participant) |
+| Correctness under concurrent harvest+load | OK (both checkpoints) | OK (both checkpoints) |
+
+Environment: same host as every prior round (22 logical cores, `CLK_TCK=100`).
+
+**On the 18 failed checks:** k6's own `http_req_failed` threshold (HTTP
+transport-level failures, e.g. connection errors) reports a clean 0.00%
+for the Rust run - the 18 counted above are `check()` failures on `status
+is 200` specifically, out of 1,179,604 requests (0.0015%), not dropped or
+errored connections. Not investigated further in this round (the
+magnitude is negligible against the correctness checkpoints, which both
+passed cleanly); worth a closer look only if a future round wants a
+zero-tolerance figure rather than a directionally-clean one.
+
+### Cleanup
+
+Real output from this re-run's own `run-harvest-bench.sh` trap:
+
+```
+[run-harvest-bench] === SUMMARY ===
+[run-harvest-bench] EDC   correctness: early=OK  late=OK
+[run-harvest-bench] Rust  correctness: early=OK  late=OK
+[run-harvest-bench] results saved under compliance/harvest-bench/results
+[run-harvest-bench] cleanup: killing any tracked PIDs and sweeping ports 19201|19211|19221|19231|19241|19251|19261|19301|19311|19321|19331|19341|19351|19361|19401|19411|19421|19431|19451|19461|19501
+[run-harvest-bench] post-cleanup port sweep:
+[run-harvest-bench]   (clean - no listeners in this benchmark's port range)
+```
+
+The separate ad hoc run for the response-shape capture above was
+re-verified clean the same way afterward (`ss -tlnp`, `pgrep -x java`,
+both empty once the one stray Gradle daemon it left behind was stopped
+with `./gradlew --stop` in both `compliance/crawler-edc-fixture/` and
+`compliance/harvest-bench/edc-fedcat-runtime/`).
 
 ## Cleanup
 

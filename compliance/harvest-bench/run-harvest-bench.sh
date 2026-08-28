@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # End-to-end driver for compliance/harvest-benchmark-2026-08-27.md: measures
 # EDC's own federated-catalog crawler and this project's crates/crawler +
-# http-api under the SAME condition - a background harvesting loop actively
-# re-crawling two real EDC 0.18.0 participants (3 + 7 datasets) WHILE the
-# system's own catalog-serving endpoint is under k6 load - not harvesting
-# in isolation, and not serving in isolation. See the report for why this
-# combination matters and for the actual numbers this run produced.
+# ds-catalog-broker-rs under the SAME condition - a background harvesting
+# loop actively re-crawling two real EDC 0.18.0 participants (3 + 7
+# datasets) WHILE the system's own catalog-serving endpoint is under k6
+# load - not harvesting in isolation, and not serving in isolation. See
+# the report for why this combination matters and for the actual numbers
+# this run produced. ds-catalog-broker-rs serves its aggregated catalog at
+# `GET /catalog`, not a DSP `POST /catalog/request` - it stopped answering
+# the DSP catalog protocol as a provider once that surface was removed
+# (see ../../docs/gap-analysis-2026-08-27.md).
 #
 # Reuses, unchanged: ../crawler-edc-fixture/run-instance.sh (the two new
 # "harvest" EDC participants), the k6/RSS-CPU-sampling methodology from
@@ -153,25 +157,25 @@ log "=== PHASE 2: ds-catalog-broker-rs (crates/crawler + ds-catalog-broker-rs) =
 sleep 5
 RUST_PID=$(ss -tlnp 2>/dev/null | grep ":19501 " | grep -oP 'pid=\K[0-9]+' | head -1)
 if [ -z "$RUST_PID" ]; then
-  log "FATAL: http-api did not come up"
+  log "FATAL: ds-catalog-broker-rs did not come up"
   tail -n 60 "$RESULTS_DIR/rust-http-api.log" 2>&1
   exit 1
 fi
 PIDS_TO_CLEAN+=("$RUST_PID")
-log "http-api pid=$RUST_PID, waiting for first crawl cycle to complete"
+log "ds-catalog-broker-rs pid=$RUST_PID, waiting for first crawl cycle to complete"
 sleep 8
 
-RUST_URL="http://$RUST_ADDR/dsp/catalog/request"
+RUST_URL="http://$RUST_ADDR/catalog"
 log "correctness check #1 (early, before load)"
 python3 "$SCRIPT_DIR/check_catalog.py" rust "$RUST_URL" | tee "$RESULTS_DIR/rust-correctness-early.txt"
 RUST_EARLY_STATUS=$?
 
-log "starting RSS/CPU sampler on http-api pid=$RUST_PID for 35s (background)"
+log "starting RSS/CPU sampler on ds-catalog-broker-rs pid=$RUST_PID for 35s (background)"
 bash "$SCRIPT_DIR/sample-rss-cpu.sh" "$RUST_PID" 35 "$RESULTS_DIR/rust-rss-cpu.csv" &
 SAMPLER_PID=$!
 
-log "running k6 against http-api's DSP endpoint ($RUST_URL) while crawl loop keeps running"
-k6 run -e TARGET_URL="$RUST_URL" \
+log "running k6 against ds-catalog-broker-rs's catalog-serving endpoint ($RUST_URL) while crawl loop keeps running"
+k6 run -e TARGET_URL="$RUST_URL" -e METHOD=GET \
     "$SCRIPT_DIR/catalog-request.k6.js" 2>&1 | tee "$RESULTS_DIR/rust-k6.log"
 
 log "correctness check #2 (immediately after load)"
@@ -180,10 +184,10 @@ RUST_LATE_STATUS=$?
 
 wait "$SAMPLER_PID" 2>/dev/null || true
 
-log "stopping http-api pid=$RUST_PID"
+log "stopping ds-catalog-broker-rs pid=$RUST_PID"
 kill "$RUST_PID" 2>/dev/null || true
 sleep 2
-kill -0 "$RUST_PID" 2>/dev/null && { log "still alive, force killing"; kill -9 "$RUST_PID"; } || log "http-api stopped cleanly"
+kill -0 "$RUST_PID" 2>/dev/null && { log "still alive, force killing"; kill -9 "$RUST_PID"; } || log "ds-catalog-broker-rs stopped cleanly"
 
 log "=== SUMMARY ==="
 log "EDC   correctness: early=$([ $EDC_EARLY_STATUS -eq 0 ] && echo OK || echo FAIL)  late=$([ $EDC_LATE_STATUS -eq 0 ] && echo OK || echo FAIL)"

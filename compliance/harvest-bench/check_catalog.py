@@ -6,7 +6,12 @@ result contains exactly the 10 expected harvested dataset ids
 
 Usage:
   check_catalog.py edc  <management-api-base-url>
-  check_catalog.py rust <dsp-catalog-request-url>
+  check_catalog.py rust <catalog-url>
+
+ds-catalog-broker-rs no longer answers DSP `CatalogRequestMessage`s (that
+provider-role surface was removed - see the gap analysis); its own
+catalog-serving endpoint is now `GET /catalog`, returning
+`{"catalogs": [{"datasets": [{"id": ...}, ...], ...}, ...]}`.
 
 Exits 0 and prints "OK <sorted-ids>" on success, exits 1 and prints
 "MISMATCH expected=... got=..." otherwise. Always prints the raw
@@ -26,6 +31,12 @@ def post(url, body, headers=None):
         headers={"Content-Type": "application/json", **(headers or {})},
         method="POST",
     )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def get(url, headers=None):
+    req = urllib.request.Request(url, headers=headers or {}, method="GET")
     with urllib.request.urlopen(req, timeout=10) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
@@ -60,12 +71,10 @@ def main():
         for catalog in catalogs:
             ids |= dataset_ids_from_catalog(catalog)
     elif mode == "rust":
-        body = json.dumps({
-            "@context": ["https://w3id.org/dspace/2025/1/context.jsonld"],
-            "@type": "CatalogRequestMessage",
-        })
-        catalog = post(url, body)
-        ids = dataset_ids_from_catalog(catalog)
+        response = get(url)
+        ids = set()
+        for catalog in response.get("catalogs", []):
+            ids |= {ds.get("id") for ds in catalog.get("datasets", [])}
     else:
         print(f"unknown mode {mode!r}, expected 'edc' or 'rust'")
         sys.exit(2)
