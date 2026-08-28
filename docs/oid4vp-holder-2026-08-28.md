@@ -155,6 +155,93 @@ section present, mirroring the existing DCP checks exactly.
 
 ## Status
 
-Implementation, tests, and any further wire-shape corrections found during
-TDD will be recorded here as the pass lands — this section is expected to
-change after initial commit, the rest of this document is not.
+Landed via real RED/GREEN TDD on `feature/oid4vc-holder`:
+
+- RED: `365cca7` - "RED: OID4VP holder-presentation tests for crawl_one
+  (fails to compile against 5cbe1d1)". Confirmed failing: `cargo test -p
+  crawler` failed to compile (`error[E0432]: unresolved import
+  config::CredentialProtocol`, plus every other new symbol these tests
+  reference) before any production code existed.
+- GREEN: `51d5886` - "GREEN: implement OID4VP holder presentation
+  alongside DCP". `cargo test --workspace`: **541 passed, 0 failed, 1
+  ignored** (the pre-existing `#[ignore]`d real-EDC integration test,
+  untouched by this change). `cargo test -p crawler` alone: 28 unit tests
+  (13 in `config`, 8 in `oid4vp`, 7 in `lib::tests`) + 4 real-mock-server
+  integration tests in `multi_participant_crawl.rs` + 1 ignored.
+- This docs commit.
+
+### What actually landed, vs. this document's plan
+
+All field/function/type names match the plan above exactly, with one
+addition and one clarification not spelled out above:
+
+- `CredentialProtocol::Oid4Vp`'s TOML wire value is `"oid4vp"`, not the
+  `#[serde(rename_all = "snake_case")]` default of `"oid4_vp"` (splitting
+  the digit/letter boundary) - needed an explicit `#[serde(rename =
+  "oid4vp")]` on that one variant to get the value this document (and
+  every example TOML) actually uses.
+- `present()`'s `vp_token` `aud` claim is `response_uri` itself.
+  `present()`'s signature (deliberately, per this document) has no
+  separate `audience`/`client_id` parameter, so `response_uri` - the only
+  identifier of "who this presentation is for" this crawler actually has
+  in v1's non-interactive flow - is what gets passed as `build_vp_token`'s
+  `audience` argument. Not a deviation from the design (nothing above
+  specified an alternative), just the concrete choice made where the doc
+  left it implicit.
+- `ConfigError::MissingHolderSection`'s message was generalized from
+  "has requires_dcp = true but this config file has no [holder] section"
+  to protocol-neutral wording, since it's now returned for both `Dcp` and
+  `Oid4Vp` participants (the underlying need - a holder identity to sign
+  with - is identical either way, exactly as this document's Config
+  section says). The variant name and the check's behavior are unchanged.
+
+### Confirmed: the DCP path is unmodified in behavior
+
+`CredentialProtocol::Dcp`'s `crawl_one` arm is the same code as the old
+`if participant.requires_dcp` branch, reading the new enum instead of the
+old bool - same `mint_self_issued_token` call, same
+`bearer_auth`/`provider_did`/holder-identity checks, same error message
+text (`"... requires_dcp but no holder identity is configured"` /
+`"... requires_dcp but has no provider_did"` - left as-is deliberately;
+renaming them was out of scope and would have been a gratuitous,
+unrequested string change). Every pre-existing DCP-path test passes
+unmodified: `crates/dcp-core/src/lib.rs`'s own 2 unit tests, and all 4
+tests in `crates/crawler/tests/multi_participant_crawl.rs` (only its
+`ParticipantEntry` field-literal fixtures and `clone_entry` helper needed
+updating for the field rename - no test assertion changed).
+
+### `requires_dcp` grep, workspace-wide
+
+```
+$ grep -rn "requires_dcp" --include="*.rs" --include="*.toml" .
+crates/crawler/src/config.rs:69:/// old `requires_dcp`.
+crates/crawler/src/config.rs:111:    /// `CredentialProtocol::None`, matching how `requires_dcp` used to
+crates/crawler/src/config.rs:130:/// `requires_dcp`.
+crates/crawler/src/lib.rs:134:                format!("participant '{}' requires_dcp but no holder identity is configured", participant.id)
+crates/crawler/src/lib.rs:137:                format!("participant '{}' requires_dcp but has no provider_did", participant.id)
+```
+
+Every remaining hit is an intentional exception, not a missed call site:
+the three in `config.rs` are doc-comment prose explicitly contrasting the
+new enum with the field it replaced ("matching how `requires_dcp` used to
+default to..."); the two in `lib.rs` are the `Dcp` arm's own error message
+text, kept byte-for-byte per this section's "DCP path is unmodified"
+point above. No `ParticipantEntry` field, `bool`, or TOML key named
+`requires_dcp` exists anywhere in the workspace any more - `cargo build
+--workspace` and `cargo test --workspace` both confirmed green (see
+above), so nothing outside `crates/crawler` referenced the old field
+either.
+
+### `crawl_one` behavior per `CredentialProtocol` variant (final)
+
+- `None`: unchanged - the fixed, non-secret
+  `OPEN_PARTICIPANT_PLACEHOLDER_AUTH` header, no credential involved.
+- `Dcp`: unchanged - mints and sends a self-issued DCP token (T1) as
+  `Authorization: Bearer`, requiring `provider_did` and a holder identity.
+- `Oid4Vp`: requires `oid4vp_response_uri` and a holder identity (both
+  defensive per-participant-failure checks, matching `Dcp`'s own
+  posture); calls `oid4vp::present(http, &holder.key_pair,
+  &holder.credential_jws, oid4vp_response_uri)`, then attaches the
+  returned `access_token` via `.bearer_auth(...)` on the *same*
+  `catalog_request_url` call `crawl_one` already makes - exactly one extra
+  outbound request (`present`'s own POST), never a second catalog fetch.
