@@ -19,7 +19,9 @@ pub mod config;
 // wires it into `crawl_one` yet - that lands in the GREEN commit.
 pub mod oid4vp;
 
-pub use config::{ConfigError, CredentialProtocol, HolderConfig, ParticipantEntry, ParticipantsConfig};
+pub use config::{
+    ConfigError, CredentialProtocol, HolderConfig, ParticipantEntry, ParticipantsConfig,
+};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -124,7 +126,10 @@ async fn crawl_one(
             // authentication - not `.bearer_auth(...)` (no "Bearer "
             // prefix wanted here; a raw header value is what real EDC's
             // DSP layer reads verbatim).
-            request = request.header(reqwest::header::AUTHORIZATION, OPEN_PARTICIPANT_PLACEHOLDER_AUTH);
+            request = request.header(
+                reqwest::header::AUTHORIZATION,
+                OPEN_PARTICIPANT_PLACEHOLDER_AUTH,
+            );
         }
         config::CredentialProtocol::Dcp => {
             // Config validation (`ParticipantsConfig::validate`) already
@@ -136,10 +141,16 @@ async fn crawl_one(
             // as a per-participant failure, not a panic, since a crawl
             // cycle should never take down the process.
             let holder = holder.ok_or_else(|| {
-                format!("participant '{}' requires_dcp but no holder identity is configured", participant.id)
+                format!(
+                    "participant '{}' requires_dcp but no holder identity is configured",
+                    participant.id
+                )
             })?;
             let provider_did = participant.provider_did.as_deref().ok_or_else(|| {
-                format!("participant '{}' requires_dcp but has no provider_did", participant.id)
+                format!(
+                    "participant '{}' requires_dcp but has no provider_did",
+                    participant.id
+                )
             })?;
             let token = holder.mint_self_issued_token(provider_did);
             request = request.bearer_auth(token);
@@ -151,14 +162,26 @@ async fn crawl_one(
             // section, but this still fails per-participant, not with a
             // panic, if a hand-built config is inconsistent.
             let holder = holder.ok_or_else(|| {
-                format!("participant '{}' requires oid4vp but no holder identity is configured", participant.id)
+                format!(
+                    "participant '{}' requires oid4vp but no holder identity is configured",
+                    participant.id
+                )
             })?;
             let response_uri = participant.oid4vp_response_uri.as_deref().ok_or_else(|| {
-                format!("participant '{}' requires oid4vp but has no oid4vp_response_uri", participant.id)
+                format!(
+                    "participant '{}' requires oid4vp but has no oid4vp_response_uri",
+                    participant.id
+                )
             })?;
-            let access_token = oid4vp::present(http, &holder.key_pair, &holder.credential_jws, response_uri)
-                .await
-                .map_err(|e| format!("participant '{}' OID4VP presentation to {response_uri} failed: {e}", participant.id))?;
+            let access_token =
+                oid4vp::present(http, &holder.key_pair, &holder.credential_jws, response_uri)
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "participant '{}' OID4VP presentation to {response_uri} failed: {e}",
+                            participant.id
+                        )
+                    })?;
             request = request.bearer_auth(access_token);
         }
     }
@@ -643,8 +666,13 @@ mod tests {
         gated.oid4vp_response_uri = Some("http://127.0.0.1:0/oid4vp/response".to_string());
         let http = reqwest::Client::new();
 
-        let err = crawl_one(&http, &gated, None).await.expect_err("should fail without a holder, not panic");
-        assert!(err.contains("no holder identity is configured"), "unexpected error: {err}");
+        let err = crawl_one(&http, &gated, None)
+            .await
+            .expect_err("should fail without a holder, not panic");
+        assert!(
+            err.contains("no holder identity is configured"),
+            "unexpected error: {err}"
+        );
     }
 
     // --- OID4VP end-to-end wiring (docs/oid4vp-holder-2026-08-28.md) ---
@@ -658,7 +686,9 @@ mod tests {
     // isolation.
 
     async fn bind_localhost() -> (tokio::net::TcpListener, std::net::SocketAddr) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind 127.0.0.1:0");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind 127.0.0.1:0");
         let addr = listener.local_addr().expect("local_addr");
         (listener, addr)
     }
@@ -679,7 +709,9 @@ mod tests {
         let (listener, addr) = bind_localhost().await;
         let app = axum::Router::new().route(
             "/oid4vp/response",
-            axum::routing::post(move || async move { axum::Json(json!({"access_token": access_token})) }),
+            axum::routing::post(move || async move {
+                axum::Json(json!({"access_token": access_token}))
+            }),
         );
         spawn_server(listener, app);
         format!("http://{addr}/oid4vp/response")
@@ -691,7 +723,9 @@ mod tests {
         let (listener, addr) = bind_localhost().await;
         let app = axum::Router::new().route(
             "/oid4vp/response",
-            axum::routing::post(|| async { (axum::http::StatusCode::UNAUTHORIZED, "invalid_request") }),
+            axum::routing::post(|| async {
+                (axum::http::StatusCode::UNAUTHORIZED, "invalid_request")
+            }),
         );
         spawn_server(listener, app);
         format!("http://{addr}/oid4vp/response")
@@ -721,7 +755,11 @@ mod tests {
                     }))
                     .into_response()
                 } else {
-                    (axum::http::StatusCode::UNAUTHORIZED, "missing or wrong bearer token").into_response()
+                    (
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        "missing or wrong bearer token",
+                    )
+                        .into_response()
                 }
             }),
         );
@@ -730,7 +768,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn crawl_once_presents_oid4vp_and_uses_the_returned_access_token_on_the_catalog_request() {
+    async fn crawl_once_presents_oid4vp_and_uses_the_returned_access_token_on_the_catalog_request()
+    {
         const ACCESS_TOKEN: &str = "mock-oid4vp-access-token-xyz";
         let oid4vp_response_uri = spawn_oid4vp_response_server(ACCESS_TOKEN).await;
         let catalog_request_url = spawn_catalog_server_expecting_bearer(ACCESS_TOKEN).await;
@@ -757,7 +796,10 @@ mod tests {
         assert_eq!(summary.failed, 0, "summary: {summary:?}");
         assert_eq!(summary.succeeded, 1, "summary: {summary:?}");
 
-        let stored = cache.query(CatalogQuery::for_node(NodeId::new("oid4vp-participant"))).await.unwrap();
+        let stored = cache
+            .query(CatalogQuery::for_node(NodeId::new("oid4vp-participant")))
+            .await
+            .unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].id, "oid4vp-catalog");
         assert_eq!(stored[0].datasets.len(), 1);
@@ -772,7 +814,8 @@ mod tests {
         oid4vp_participant.credential_protocol = CredentialProtocol::Oid4Vp;
         // Never actually reached: `oid4vp::present` must fail before any
         // catalog request is attempted.
-        oid4vp_participant.catalog_request_url = "http://127.0.0.1:0/dsp/catalog/request".to_string();
+        oid4vp_participant.catalog_request_url =
+            "http://127.0.0.1:0/dsp/catalog/request".to_string();
         oid4vp_participant.oid4vp_response_uri = Some(oid4vp_response_uri);
 
         let holder = HolderIdentity::new(
@@ -794,6 +837,9 @@ mod tests {
         assert_eq!(summary.failures[0].0, "oid4vp-participant");
 
         let stored = cache.query(CatalogQuery::all()).await.unwrap();
-        assert!(stored.is_empty(), "a rejected presentation must not cache anything for this participant");
+        assert!(
+            stored.is_empty(),
+            "a rejected presentation must not cache anything for this participant"
+        );
     }
 }

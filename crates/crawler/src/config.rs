@@ -178,7 +178,9 @@ pub enum ConfigError {
     },
     #[error("participant '{id}' has credential_protocol = dcp but no provider_did is set")]
     MissingProviderDid { id: String },
-    #[error("participant '{id}' has credential_protocol = oid4vp but no oid4vp_response_uri is set")]
+    #[error(
+        "participant '{id}' has credential_protocol = oid4vp but no oid4vp_response_uri is set"
+    )]
     MissingOid4VpResponseUri { id: String },
     #[error(
         "participant '{id}' has a credential_protocol that requires a holder identity, but this config file has no [holder] section"
@@ -317,7 +319,10 @@ mod tests {
             catalog_request_url = "http://127.0.0.1:19001/dsp/catalog/request"
         "#;
         let config = ParticipantsConfig::parse(raw, "test.toml").expect("should parse");
-        assert!(matches!(config.participants[0].credential_protocol, CredentialProtocol::None));
+        assert!(matches!(
+            config.participants[0].credential_protocol,
+            CredentialProtocol::None
+        ));
         assert!(config.holder.is_none());
     }
 
@@ -383,7 +388,10 @@ mod tests {
         let config = ParticipantsConfig::parse(raw, "test.toml").expect("should parse");
         let p = &config.participants[0];
         assert!(matches!(p.credential_protocol, CredentialProtocol::Oid4Vp));
-        assert_eq!(p.oid4vp_response_uri.as_deref(), Some("http://127.0.0.1:19003/oid4vp/response"));
+        assert_eq!(
+            p.oid4vp_response_uri.as_deref(),
+            Some("http://127.0.0.1:19003/oid4vp/response")
+        );
         assert!(p.provider_did.is_none());
     }
 
