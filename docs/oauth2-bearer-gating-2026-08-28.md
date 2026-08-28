@@ -104,6 +104,20 @@ found during implementation, neither a behavior change:
   doesn't derive one) that prints the config and the loaded `kid`s only —
   never key material.
 
+A follow-up adversarial security review pass (two independent lenses —
+crypto correctness, route coverage) found the algorithm-confusion guard,
+key selection, `exp`/`nbf` handling, and route wiring all sound, but the
+fix pass it triggered caught one real gap the reviewers themselves missed:
+`OAuth2Verifier::verify` called `set_issuer`/`set_audience` when
+`OAUTH2_ISSUER`/`OAUTH2_AUDIENCE` were configured, but `jsonwebtoken` only
+checks those claims *if present* on the token — it never required them to
+be present at all. A validly-signed token from the configured JWKS that
+simply omitted `iss`/`aud` sailed through unchecked, defeating the point of
+setting those env vars. Reproduced RED first
+(`verify_rejects_a_token_with_no_{aud,iss}_claim_at_all_when_{audience,issuer}_is_configured`),
+then fixed by adding `"iss"`/`"aud"` to `validation.required_spec_claims`
+whenever the corresponding config is set — commit `95290e9`.
+
 **Module:** `crates/ds-catalog-broker-rs/src/oauth2.rs` —
 `OAuth2Config { jwks_uri, issuer, audience, required_scope }`,
 `OAuth2Verifier::fetch(&reqwest::Client, OAuth2Config) -> Result<Self, JwksError>`,
@@ -143,7 +157,9 @@ above — and `scope`) plus 10 new router-level integration tests in `lib.rs`
 `build_router`, a real mock JWKS HTTP server per
 `crates/crawler/tests/multi_participant_crawl.rs`'s established pattern,
 and confirmation that `/health` stays reachable with no token even when
-gating is configured). `cargo test --workspace`: 525 passed, 0 failed, 1
+gating is configured), plus 2 further regression tests from the security
+fix above (`43` total in this crate's own `--lib` binary as of `95290e9`).
+`cargo test --workspace`: all suites `ok`, 0 failed, 1
 ignored (an unrelated test requiring three real running EDC instances).
 
 **Deviations from the initial design doc:** none in scope or shape — the
