@@ -11,7 +11,18 @@ catalog-core = { path = "../catalog-core" }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-contreforts-kg = { path = "../../vendor/contreforts-kg" }
+# default-features = false: contreforts-kg's own `default = ["rocksdb"]`
+# feature (vendor/contreforts-kg/Cargo.toml) re-enables oxigraph's
+# RocksDB backend, which pulls in oxrocksdb-sys (a from-source C++/cmake
+# build - the single biggest CI/build-time cost in this workspace).
+# rdf-store, and this product, never open a RocksDB-backed store:
+# OxigraphCatalogCache is always constructed via ::in_memory() (see this
+# crate's own oxigraph_backend module and main.rs) - persistent on-disk
+# storage is explicitly out of scope by design (see README's "RDF
+# backend" section: "In-memory only ... no on-disk persistence option
+# either, by design, not as a gap"). So RocksDB support costs real build
+# time for a capability nothing in this workspace exercises.
+contreforts-kg = { path = "../../vendor/contreforts-kg", default-features = false }
 oxigraph = { workspace = true }
 urlencoding = { workspace = true }
 
