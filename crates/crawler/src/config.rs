@@ -67,13 +67,14 @@ pub struct ParticipantsConfig {
 /// endpoint requires, if any. See `docs/oid4vp-holder-2026-08-28.md` for
 /// why this is an enum rather than a second parallel bool alongside the
 /// old `requires_dcp`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialProtocol {
     /// No credential presented - today's unauthenticated case (still a
     /// real, non-empty `Authorization` header on the wire, see
     /// `OPEN_PARTICIPANT_PLACEHOLDER_AUTH` in `crawler::lib`, but no
     /// credential-backed identity).
+    #[default]
     None,
     /// A DCP self-issued token (`Authorization: Bearer <token>`) minted
     /// via `dcp_core::HolderIdentity::mint_self_issued_token`. Requires
@@ -91,12 +92,6 @@ pub enum CredentialProtocol {
     // actual wire value the design doc and every config example use.
     #[serde(rename = "oid4vp")]
     Oid4Vp,
-}
-
-impl Default for CredentialProtocol {
-    fn default() -> Self {
-        CredentialProtocol::None
-    }
 }
 
 /// One participant this crawler polls.
