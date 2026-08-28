@@ -55,11 +55,12 @@ async fn main() {
     // loop. `InMemoryCatalogCache` (a plain `HashMap`, not backed by RDF
     // at all) stays the default for everyone not opting into the crawler,
     // per this function's own strict backward-compatibility requirement.
-    let (cache, holder, sparql): (
+    type CacheHolderSparql = (
         Arc<dyn CatalogCache>,
         Option<Arc<HolderIdentity>>,
         Option<Arc<rdf_store::oxigraph_backend::OxigraphCatalogCache>>,
-    ) = match load_crawler_config() {
+    );
+    let (cache, holder, sparql): CacheHolderSparql = match load_crawler_config() {
         Some(config) => {
             // Kept as a concrete `Arc<OxigraphCatalogCache>` (not just the
             // `Arc<dyn CatalogCache>` coercion below) purely so `AppState`

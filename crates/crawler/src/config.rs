@@ -149,10 +149,11 @@ impl ParticipantsConfig {
     /// so tests can exercise parsing/validation without touching the
     /// filesystem.
     pub fn parse(raw: &str, path_for_errors: &str) -> Result<Self, ConfigError> {
-        let config: ParticipantsConfig = toml::from_str(raw).map_err(|source| ConfigError::Parse {
-            path: path_for_errors.to_string(),
-            source,
-        })?;
+        let config: ParticipantsConfig =
+            toml::from_str(raw).map_err(|source| ConfigError::Parse {
+                path: path_for_errors.to_string(),
+                source,
+            })?;
         config.validate()?;
         Ok(config)
     }
@@ -217,13 +218,19 @@ mod tests {
         let a = &config.participants[0];
         assert_eq!(a.id, "participant-a");
         assert_eq!(a.name, "Participant A");
-        assert_eq!(a.catalog_request_url, "http://127.0.0.1:19001/dsp/catalog/request");
+        assert_eq!(
+            a.catalog_request_url,
+            "http://127.0.0.1:19001/dsp/catalog/request"
+        );
         assert!(!a.requires_dcp);
         assert!(a.provider_did.is_none());
 
         let gated = &config.participants[1];
         assert!(gated.requires_dcp);
-        assert_eq!(gated.provider_did.as_deref(), Some("did:web:localhost%3A19002:dsp"));
+        assert_eq!(
+            gated.provider_did.as_deref(),
+            Some("did:web:localhost%3A19002:dsp")
+        );
 
         let holder = config.holder.expect("holder section present");
         assert_eq!(holder.own_did_host, "localhost:19100");
@@ -294,13 +301,15 @@ mod tests {
 
     #[test]
     fn rejects_malformed_toml() {
-        let err = ParticipantsConfig::parse("not = [valid", "test.toml").expect_err("should reject");
+        let err =
+            ParticipantsConfig::parse("not = [valid", "test.toml").expect_err("should reject");
         assert!(matches!(err, ConfigError::Parse { .. }));
     }
 
     #[test]
     fn load_reports_a_clear_error_for_a_missing_file() {
-        let err = ParticipantsConfig::load("/nonexistent/path/to/crawler-config.toml").expect_err("should fail");
+        let err = ParticipantsConfig::load("/nonexistent/path/to/crawler-config.toml")
+            .expect_err("should fail");
         assert!(matches!(err, ConfigError::Io { .. }));
     }
 }
