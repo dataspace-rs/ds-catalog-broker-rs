@@ -22,8 +22,20 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 reqwest = { workspace = true }
+thiserror = { workspace = true }
+# JWT verification for the OAuth2 Bearer gate - see src/oauth2.rs's module
+# doc and docs/oauth2-bearer-gating-2026-08-28.md.
+jsonwebtoken = { workspace = true }
 
 [dev-dependencies]
 tower = { workspace = true }
 http-body-util = "0.1"
 urlencoding = { workspace = true }
+# Mint EC keypairs and hand-sign compact JWS test tokens for a mock JWKS
+# endpoint in oauth2.rs's and lib.rs's own tests - independent of both
+# jsonwebtoken's own EncodingKey and of dcp-core's sign_jws, so the
+# production verifier this exercises is proven against a signer with no
+# shared code path. See oauth2.rs's `test_support` module.
+p256 = { workspace = true }
+rand = { workspace = true }
+base64 = { workspace = true }
