@@ -39,3 +39,12 @@ urlencoding = { workspace = true }
 p256 = { workspace = true }
 rand = { workspace = true }
 base64 = { workspace = true }
+# The real, already-published client this product's `POST
+# /api/management/v4/catalogs/request` route must be wire-compatible with -
+# used only in tests, to deserialize this route's real response body into
+# the client's own `FederatedCatalogOffer`/`Dataset`/`Service`/`ParticipantId`
+# structs (see lib.rs's tests). Production code does not depend on this
+# crate: the route builds its own request/response types by hand so the
+# wire format is this product's own responsibility, proven correct against
+# the real client rather than borrowed from it.
+edc-federated-catalog-client = "0.2.5"
