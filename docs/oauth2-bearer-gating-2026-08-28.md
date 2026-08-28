@@ -1,9 +1,12 @@
 # OAuth2 Bearer gating for the non-DSP serving surfaces
 
 **Date:** 2026-08-28
-**Status:** in progress — this document is written first and updated as the
-corresponding TDD implementation pass lands, tracked in
-[PR TBD](.) on branch `feature/oauth2-bearer-gating`.
+**Status:** landed, tracked in
+[PR #1](https://github.com/ds-labs-org/ds-catalog-broker-rs/pull/1) on
+branch `feature/oauth2-bearer-gating`. Implemented via TDD in two commits:
+`RED: OAuth2 Bearer gate tests for /catalog and /sparql` (fails to
+compile) followed by `GREEN: implement the OAuth2 Bearer gate for
+/catalog and /sparql`.
 
 ## Why this exists
 
@@ -88,6 +91,62 @@ spec-tested JWT library is for.
 
 ## Status
 
-Implementation, tests, and the final verified response/error shapes will
-be filled in here as the TDD pass lands — this section is the one part of
-this document expected to change after initial commit.
+Landed exactly as scoped above, with one clarification and one addition
+found during implementation, neither a behavior change:
+
+- `OAUTH2_AUDIENCE` unset must mean "don't check `aud` at all" (as this
+  document already said), not "reject any token that happens to carry an
+  `aud` claim" — `jsonwebtoken::Validation` defaults to the latter once no
+  expected audience is set, so `OAuth2Verifier::verify` explicitly sets
+  `validation.validate_aud = false` in that case. Covered by
+  `oauth2::tests::verify_accepts_a_token_with_an_aud_claim_when_audience_is_not_configured`.
+- `OAuth2Verifier` needed a hand-written `Debug` impl (`jsonwebtoken::DecodingKey`
+  doesn't derive one) that prints the config and the loaded `kid`s only —
+  never key material.
+
+**Module:** `crates/ds-catalog-broker-rs/src/oauth2.rs` —
+`OAuth2Config { jwks_uri, issuer, audience, required_scope }`,
+`OAuth2Verifier::fetch(&reqwest::Client, OAuth2Config) -> Result<Self, JwksError>`,
+`OAuth2Verifier::verify(&self, token: &str) -> Result<serde_json::Value, VerifyError>`.
+`JwksError` (`Fetch`, `Parse`, `NoUsableKeys`) covers construction;
+`VerifyError` (`UnknownKid`, `InvalidToken`, `InsufficientScope`) covers
+verification, with `InsufficientScope` kept distinct precisely so the
+router can answer `403` instead of `401`.
+
+**Wiring:** `AppState` gained `oauth2: Option<Arc<OAuth2Verifier>>` and a
+`with_oauth2` builder (mirrors `with_sparql`/`with_holder`).
+`check_oauth2_bearer` gates `GET /catalog` and `GET`/`POST /sparql` only;
+`/health` and the two `/dsp/holder/*` routes are untouched. `main.rs`'s
+`load_oauth2_config` reads the four `OAUTH2_*` env vars from the config
+table above and fetches the verifier eagerly, before `AppState` is built;
+a configured-but-bad JWKS panics at boot with a clear message (same
+posture as `CRAWLER_CONFIG_PATH`).
+
+**Response/status-code shapes, exactly as implemented** (both gated
+routes, identical behavior):
+
+| Condition | Status | Notes |
+|---|---|---|
+| `AppState::oauth2` is `None` (env var unset) | unchanged | Every pre-existing test for both routes passes unmodified. |
+| No `Authorization` header, or not a `Bearer` token | `401` | `WWW-Authenticate: Bearer` header set (RFC 6750). |
+| Token fails to parse/verify (bad signature, unknown `kid`, expired, wrong `iss`/`aud` when configured) | `401` | Same `WWW-Authenticate: Bearer` header. |
+| Token verifies, but its `scope` claim doesn't contain `OAUTH2_REQUIRED_SCOPE` | `403` | No `WWW-Authenticate` header — this is an authorization failure, not an authentication one. |
+| Token verifies and (if configured) carries the required scope | route's normal response | e.g. `200` with the real catalog/SPARQL body. |
+
+**Tests:** the `ds-catalog-broker-rs` crate's own unit test binary grew
+from 13 tests (before this branch) to 41 — 18 new unit tests in
+`oauth2.rs` (JWKS fetch/parse, `kid` lookup, oct-key and unsupported-curve
+skipping, algorithm inference from both `alg` and `kty`/`crv`, `exp`,
+`iss`, `aud` — including the "aud claim present but unconfigured" guard
+above — and `scope`) plus 10 new router-level integration tests in `lib.rs`
+(both `/catalog` and `/sparql`, real `oneshot` requests through
+`build_router`, a real mock JWKS HTTP server per
+`crates/crawler/tests/multi_participant_crawl.rs`'s established pattern,
+and confirmation that `/health` stays reachable with no token even when
+gating is configured). `cargo test --workspace`: 525 passed, 0 failed, 1
+ignored (an unrelated test requiring three real running EDC instances).
+
+**Deviations from the initial design doc:** none in scope or shape — the
+only two adjustments are the `validate_aud` clarification and the
+`Debug` impl noted above, both implementation details invisible to a
+caller of this API.
