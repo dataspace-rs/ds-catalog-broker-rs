@@ -2,8 +2,9 @@
 
 **Date:** 2026-08-28
 **Status:** in progress — this document is written first and updated as the
-corresponding TDD implementation pass lands, tracked in a PR on branch
-`feature/oid4vp-holder` (branched from `feature/oauth2-bearer-gating`,
+corresponding TDD implementation pass lands, tracked in
+[PR #2](https://github.com/ds-labs-org/ds-catalog-broker-rs/pull/2) on
+branch `feature/oid4vc-holder` (branched from `feature/oauth2-bearer-gating`,
 which added OAuth2 Bearer gating to this connector's own *inbound* serving
 surfaces — unrelated to this document, which is about the crawler's
 *outbound* credential presentation when harvesting a gated participant).
