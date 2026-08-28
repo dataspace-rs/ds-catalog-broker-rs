@@ -260,7 +260,7 @@ struct ErrorResponse {
 fn check_oauth2_bearer(
     state: &AppState,
     headers: &HeaderMap,
-) -> Result<(), axum::response::Response> {
+) -> Result<(), Box<axum::response::Response>> {
     let Some(verifier) = &state.oauth2 else {
         return Ok(());
     };
@@ -272,21 +272,23 @@ fn check_oauth2_bearer(
         .map(str::trim)
         .filter(|token| !token.is_empty());
     let Some(token) = token else {
-        return Err(unauthorized_bearer_response());
+        return Err(Box::new(unauthorized_bearer_response()));
     };
 
     match verifier.verify(token) {
         Ok(_claims) => Ok(()),
-        Err(VerifyError::InsufficientScope(scope)) => Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: format!("token is missing required scope '{scope}'"),
-            }),
-        )
-            .into_response()),
+        Err(VerifyError::InsufficientScope(scope)) => Err(Box::new(
+            (
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: format!("token is missing required scope '{scope}'"),
+                }),
+            )
+                .into_response(),
+        )),
         Err(err) => {
             tracing::warn!(error = %err, "oauth2 bearer token verification failed");
-            Err(unauthorized_bearer_response())
+            Err(Box::new(unauthorized_bearer_response()))
         }
     }
 }
@@ -308,7 +310,7 @@ async fn get_catalog(
     Query(params): Query<CatalogParams>,
 ) -> impl IntoResponse {
     if let Err(response) = check_oauth2_bearer(&state, &headers) {
-        return response;
+        return *response;
     }
 
     let query = match params.node_id {
@@ -431,7 +433,7 @@ async fn sparql_route(
     query: Option<String>,
 ) -> axum::response::Response {
     if let Err(response) = check_oauth2_bearer(&state, &headers) {
-        return response;
+        return *response;
     }
 
     let Some(sparql) = &state.sparql else {
