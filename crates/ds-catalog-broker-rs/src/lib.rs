@@ -11,21 +11,21 @@
 
 use std::sync::Arc;
 
-// RED STATE (docs/oauth2-bearer-gating-2026-08-28.md TDD pass): declared so
-// this module's own tests (below) and `oauth2.rs`'s tests are compiled and
-// exercised, but nothing in this file wires it into `AppState`/the router
-// yet - that lands in the GREEN commit.
-mod oauth2;
+pub mod oauth2;
 
 use axum::{
     Form, Json, Router,
     extract::{Query, State},
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
+    http::{
+        HeaderMap, StatusCode,
+        header::{AUTHORIZATION, WWW_AUTHENTICATE},
+    },
     response::IntoResponse,
     routing::{get, post},
 };
 use catalog_core::{Catalog, DataService, Dataset, Distribution, NodeId};
 pub use dcp_core::HolderIdentity;
+pub use oauth2::{OAuth2Config, OAuth2Verifier, VerifyError};
 use rdf_store::oxigraph_backend::{OxigraphCatalogCache, SparqlError};
 use rdf_store::{CatalogCache, CatalogQuery, StoreResult};
 use serde::{Deserialize, Serialize};
@@ -56,6 +56,15 @@ pub struct AppState {
     /// case `/sparql` answers 501 rather than pretending to support a
     /// query language that backend doesn't implement.
     pub sparql: Option<Arc<OxigraphCatalogCache>>,
+    /// The OAuth2 Bearer resource-server gate for `GET /catalog` and
+    /// `GET`/`POST /sparql` - see `oauth2`'s module doc and
+    /// `docs/oauth2-bearer-gating-2026-08-28.md`. `Some` means gating is
+    /// active (set only when `OAUTH2_JWKS_URI` was configured, see
+    /// `main.rs`); `None` (the default) leaves both routes exactly as
+    /// unauthenticated as before this feature existed. Never gates
+    /// `/health` or the two `/dsp/holder/*` routes - those are unaffected
+    /// by this field entirely.
+    pub oauth2: Option<Arc<OAuth2Verifier>>,
 }
 
 impl AppState {
@@ -65,6 +74,7 @@ impl AppState {
             http: reqwest::Client::new(),
             holder: None,
             sparql: None,
+            oauth2: None,
         }
     }
 
@@ -79,6 +89,13 @@ impl AppState {
     /// Oxigraph-backed cache. See the `sparql` field's doc comment.
     pub fn with_sparql(mut self, sparql: Option<Arc<OxigraphCatalogCache>>) -> Self {
         self.sparql = sparql;
+        self
+    }
+
+    /// Builder-style setter for the OAuth2 Bearer gate. See the `oauth2`
+    /// field's doc comment.
+    pub fn with_oauth2(mut self, oauth2: Option<Arc<OAuth2Verifier>>) -> Self {
+        self.oauth2 = oauth2;
         self
     }
 }
@@ -225,10 +242,75 @@ struct ErrorResponse {
     error: String,
 }
 
+/// Enforces the OAuth2 Bearer gate (see `AppState::oauth2`'s doc comment
+/// and `docs/oauth2-bearer-gating-2026-08-28.md`'s "Response shape") for
+/// `GET /catalog` and `GET`/`POST /sparql` - the only two routes this
+/// mechanism gates. `Ok(())` means either gating is off (`state.oauth2` is
+/// `None`) or the caller presented a valid, sufficiently-scoped token;
+/// `Err(response)` is the exact response the caller should get instead of
+/// running the route's own handler.
+///
+/// - No/malformed `Authorization: Bearer` header, or a token that fails
+///   verification for any reason other than scope (unknown `kid`, bad
+///   signature, expired, wrong `iss`/`aud`): `401` with a
+///   `WWW-Authenticate: Bearer` header (RFC 6750).
+/// - Valid token, missing the configured required scope: `403` (no
+///   `WWW-Authenticate` header - the caller authenticated fine, it's an
+///   authorization failure, not an authentication one).
+fn check_oauth2_bearer(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<(), axum::response::Response> {
+    let Some(verifier) = &state.oauth2 else {
+        return Ok(());
+    };
+
+    let token = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|token| !token.is_empty());
+    let Some(token) = token else {
+        return Err(unauthorized_bearer_response());
+    };
+
+    match verifier.verify(token) {
+        Ok(_claims) => Ok(()),
+        Err(VerifyError::InsufficientScope(scope)) => Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: format!("token is missing required scope '{scope}'"),
+            }),
+        )
+            .into_response()),
+        Err(err) => {
+            tracing::warn!(error = %err, "oauth2 bearer token verification failed");
+            Err(unauthorized_bearer_response())
+        }
+    }
+}
+
+fn unauthorized_bearer_response() -> axum::response::Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(WWW_AUTHENTICATE, "Bearer")],
+        Json(ErrorResponse {
+            error: "missing or invalid bearer token".to_string(),
+        }),
+    )
+        .into_response()
+}
+
 async fn get_catalog(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<CatalogParams>,
 ) -> impl IntoResponse {
+    if let Err(response) = check_oauth2_bearer(&state, &headers) {
+        return response;
+    }
+
     let query = match params.node_id {
         Some(node_id) => CatalogQuery::for_node(NodeId::new(node_id)),
         None => CatalogQuery::all(),
@@ -337,11 +419,21 @@ fn accepts_sparql_results_json(headers: &HeaderMap) -> bool {
 ///   comments): 400 Bad Request with a plain-text explanation - these are
 ///   all the caller's own query's fault.
 /// - Otherwise: 200 with an `application/sparql-results+json` body.
+///
+/// Checked first, ahead of all of the above: the OAuth2 Bearer gate (see
+/// `check_oauth2_bearer`'s doc comment) - `401`/`403` when
+/// `AppState::oauth2` is configured and the caller's token doesn't clear
+/// it; unchanged behavior (falls straight through to the checks above)
+/// when it isn't configured at all.
 async fn sparql_route(
     state: AppState,
     headers: HeaderMap,
     query: Option<String>,
 ) -> axum::response::Response {
+    if let Err(response) = check_oauth2_bearer(&state, &headers) {
+        return response;
+    }
+
     let Some(sparql) = &state.sparql else {
         return (
             StatusCode::NOT_IMPLEMENTED,
@@ -826,7 +918,9 @@ mod tests {
     // over a real HTTP fetch (`OAuth2Verifier::fetch`), not a pre-parsed
     // fixture - see `oauth2::test_support::spawn_jwks_server`.
 
-    use crate::oauth2::test_support::{base_claims, ec_jwk, generate_key, sign_es256, spawn_jwks_server};
+    use crate::oauth2::test_support::{
+        base_claims, ec_jwk, generate_key, sign_es256, spawn_jwks_server,
+    };
     use crate::oauth2::{OAuth2Config, OAuth2Verifier};
 
     fn oauth2_config(jwks_uri: String) -> OAuth2Config {
@@ -843,12 +937,16 @@ mod tests {
     /// `configure` gets to adjust `issuer`/`audience`/`required_scope`
     /// before the JWKS is fetched. Returns the state alongside the signing
     /// key so each test can mint its own tokens.
-    async fn oauth2_catalog_state(configure: impl FnOnce(&mut OAuth2Config)) -> (AppState, oauth2::test_support::TestKey) {
+    async fn oauth2_catalog_state(
+        configure: impl FnOnce(&mut OAuth2Config),
+    ) -> (AppState, oauth2::test_support::TestKey) {
         let key = generate_key("catalog-key");
         let jwks_uri = spawn_jwks_server(serde_json::json!({"keys": [ec_jwk(&key, None)]})).await;
         let mut config = oauth2_config(jwks_uri);
         configure(&mut config);
-        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), config).await.expect("fetch mock JWKS");
+        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), config)
+            .await
+            .expect("fetch mock JWKS");
 
         let state = test_state();
         seed_sample_catalog(&*state.cache).await.unwrap();
@@ -859,12 +957,16 @@ mod tests {
     /// Same idea as `oauth2_catalog_state`, but built on `sparql_test_state()`
     /// (a real Oxigraph backend, one seeded participant) so `/sparql` has
     /// something real to answer once a valid token clears the gate.
-    async fn oauth2_sparql_state(configure: impl FnOnce(&mut OAuth2Config)) -> (AppState, oauth2::test_support::TestKey) {
+    async fn oauth2_sparql_state(
+        configure: impl FnOnce(&mut OAuth2Config),
+    ) -> (AppState, oauth2::test_support::TestKey) {
         let key = generate_key("sparql-key");
         let jwks_uri = spawn_jwks_server(serde_json::json!({"keys": [ec_jwk(&key, None)]})).await;
         let mut config = oauth2_config(jwks_uri);
         configure(&mut config);
-        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), config).await.expect("fetch mock JWKS");
+        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), config)
+            .await
+            .expect("fetch mock JWKS");
 
         let state = sparql_test_state();
         state
@@ -894,7 +996,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(response.headers().get(axum::http::header::WWW_AUTHENTICATE).unwrap(), "Bearer");
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::WWW_AUTHENTICATE)
+                .unwrap(),
+            "Bearer"
+        );
     }
 
     #[tokio::test]
@@ -917,7 +1025,8 @@ mod tests {
     #[tokio::test]
     async fn catalog_route_401s_for_a_token_with_the_wrong_audience_when_audience_is_configured() {
         let (state, key) =
-            oauth2_catalog_state(|config| config.audience = Some("expected-audience".to_string())).await;
+            oauth2_catalog_state(|config| config.audience = Some("expected-audience".to_string()))
+                .await;
         let app = build_router(state);
 
         let mut claims = base_claims();
@@ -940,7 +1049,8 @@ mod tests {
     #[tokio::test]
     async fn catalog_route_403s_when_required_scope_is_missing() {
         let (state, key) =
-            oauth2_catalog_state(|config| config.required_scope = Some("catalog:read".to_string())).await;
+            oauth2_catalog_state(|config| config.required_scope = Some("catalog:read".to_string()))
+                .await;
         let app = build_router(state);
 
         let mut claims = base_claims();
@@ -989,7 +1099,12 @@ mod tests {
         let (state, _key) = oauth2_catalog_state(|_| {}).await;
         let app = build_router(state);
         let response = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -1009,13 +1124,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(response.headers().get(axum::http::header::WWW_AUTHENTICATE).unwrap(), "Bearer");
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::WWW_AUTHENTICATE)
+                .unwrap(),
+            "Bearer"
+        );
     }
 
     #[tokio::test]
     async fn sparql_route_403s_when_required_scope_is_missing() {
         let (state, key) =
-            oauth2_sparql_state(|config| config.required_scope = Some("sparql:read".to_string())).await;
+            oauth2_sparql_state(|config| config.required_scope = Some("sparql:read".to_string()))
+                .await;
         let app = build_router(state);
 
         let token = sign_es256(&key, base_claims());
@@ -1061,7 +1183,12 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let bindings = parsed["results"]["bindings"].as_array().unwrap();
         assert_eq!(bindings.len(), 1);
-        assert!(bindings[0]["dataset"]["value"].as_str().unwrap().contains("DATASET-A"));
+        assert!(
+            bindings[0]["dataset"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("DATASET-A")
+        );
     }
 
     #[tokio::test]
@@ -1091,6 +1218,11 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let bindings = parsed["results"]["bindings"].as_array().unwrap();
         assert_eq!(bindings.len(), 1);
-        assert!(bindings[0]["dataset"]["value"].as_str().unwrap().contains("DATASET-A"));
+        assert!(
+            bindings[0]["dataset"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("DATASET-A")
+        );
     }
 }

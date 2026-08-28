@@ -25,11 +25,257 @@
 //! That is what actually
 //! prevents an algorithm-confusion downgrade, not the `kid` lookup by
 //! itself.
-//!
-//! RED STATE (docs/oauth2-bearer-gating-2026-08-28.md TDD pass): only the
-//! test fixtures and tests below exist so far - `OAuth2Config`,
-//! `OAuth2Verifier`, `JwksError`, `VerifyError` are not implemented yet.
-//! This is expected not to compile.
+
+use std::collections::HashMap;
+
+use jsonwebtoken::jwk::{AlgorithmParameters, EllipticCurve, Jwk, JwkSet, KeyAlgorithm};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
+use thiserror::Error;
+
+/// Opt-in configuration for the OAuth2 Bearer gate - see the module doc
+/// and `docs/oauth2-bearer-gating-2026-08-28.md`'s config table for what
+/// each field means and how `main.rs` populates it from env vars.
+#[derive(Debug, Clone)]
+pub struct OAuth2Config {
+    pub jwks_uri: String,
+    pub issuer: Option<String>,
+    pub audience: Option<String>,
+    pub required_scope: Option<String>,
+}
+
+/// Failure fetching or parsing the JWKS at [`OAuth2Config::jwks_uri`] -
+/// returned by [`OAuth2Verifier::fetch`]. `main.rs` panics on any of
+/// these at startup, the same failure posture as a bad
+/// `CRAWLER_CONFIG_PATH` - see the design doc's config table.
+#[derive(Debug, Error)]
+pub enum JwksError {
+    #[error("failed to fetch JWKS from {uri}: {source}")]
+    Fetch {
+        uri: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("JWKS response from {uri} was not a valid JWK Set: {source}")]
+    Parse {
+        uri: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error(
+        "JWKS at {uri} contained no usable key: every entry was either missing a kid, a \
+         symmetric (oct) key (never accepted here - see the module doc), or used an \
+         algorithm/curve this verifier doesn't support (only RS256, ES256, ES384)"
+    )]
+    NoUsableKeys { uri: String },
+}
+
+/// Why a bearer token was rejected by [`OAuth2Verifier::verify`] -
+/// distinguished so the router can answer `401` vs `403` (see
+/// `docs/oauth2-bearer-gating-2026-08-28.md`'s "Response shape").
+#[derive(Debug, Error)]
+pub enum VerifyError {
+    /// The token header had no `kid`, or its `kid` doesn't match any key
+    /// admitted into this verifier (including a `kid` that *is* present in
+    /// the source JWKS but was skipped at construction - e.g. an `oct`
+    /// key, see [`JwksError::NoUsableKeys`]'s doc comment).
+    #[error("token has no kid, or its kid does not match any key in the configured JWKS")]
+    UnknownKid,
+    /// Signature, `exp`/`nbf`, or (when configured) `iss`/`aud` failed.
+    /// Deliberately not split further - all of these are "this is not a
+    /// token this resource server accepts" from the caller's point of
+    /// view, and all map to the same `401`.
+    #[error("token failed verification: {0}")]
+    InvalidToken(String),
+    /// The token verified, but its space-delimited `scope` claim doesn't
+    /// contain [`OAuth2Config::required_scope`]. The caller authenticated
+    /// fine; this is an authorization failure, hence kept distinguishable
+    /// from [`VerifyError::InvalidToken`] so the router can answer `403`
+    /// instead of `401`.
+    #[error("token is missing required scope '{0}'")]
+    InsufficientScope(String),
+}
+
+/// One JWKS entry this verifier is willing to use: the key material,
+/// alongside the algorithm *this module itself* determined for it (from
+/// the JWK's own `alg`, or inferred from `kty`/`crv`) - never the
+/// algorithm a caller's own JWT header claims. See the module doc.
+struct VerificationKey {
+    decoding_key: DecodingKey,
+    algorithm: Algorithm,
+}
+
+/// Verifies OAuth2 access tokens against a JWKS fetched once, eagerly, at
+/// construction (see [`OAuth2Verifier::fetch`]). See the module doc for
+/// the full design; **known limitation** (also flagged in the design
+/// doc): no background refresh - a JWKS rotated after this verifier was
+/// built requires a process restart to pick up.
+pub struct OAuth2Verifier {
+    config: OAuth2Config,
+    keys: HashMap<String, VerificationKey>,
+}
+
+/// Hand-written (not derived): `jsonwebtoken::DecodingKey` doesn't
+/// implement `Debug`, and this deliberately never prints key material
+/// anyway - just the config and which `kid`s are loaded, enough for
+/// `Result::expect_err`/panic messages in tests and logs.
+impl std::fmt::Debug for OAuth2Verifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuth2Verifier")
+            .field("config", &self.config)
+            .field("kids", &self.keys.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl OAuth2Verifier {
+    /// Fetch and parse the JWKS at `config.jwks_uri`, building a `kid ->`
+    /// key map. Symmetric (`oct`) keys, keys with no `kid`, and keys whose
+    /// algorithm can't be determined (see `determine_algorithm`) are
+    /// individually skipped (logged at `warn`, not treated as a hard
+    /// failure on their own - a JWKS that also carries key material this
+    /// module doesn't accept should still work for its *usable* keys); the
+    /// whole call
+    /// fails only when fetching/parsing itself fails, or when *no* key
+    /// survives that filtering (`JwksError::NoUsableKeys`).
+    pub async fn fetch(client: &reqwest::Client, config: OAuth2Config) -> Result<Self, JwksError> {
+        let uri = config.jwks_uri.clone();
+        let response = client
+            .get(&uri)
+            .send()
+            .await
+            .map_err(|source| JwksError::Fetch {
+                uri: uri.clone(),
+                source,
+            })?;
+        let response = response
+            .error_for_status()
+            .map_err(|source| JwksError::Fetch {
+                uri: uri.clone(),
+                source,
+            })?;
+        let jwk_set: JwkSet = response.json().await.map_err(|source| JwksError::Parse {
+            uri: uri.clone(),
+            source,
+        })?;
+
+        let mut keys = HashMap::new();
+        for jwk in &jwk_set.keys {
+            let Some(kid) = jwk.common.key_id.clone() else {
+                tracing::warn!("skipping a JWK in the configured JWKS that has no kid");
+                continue;
+            };
+            if matches!(jwk.algorithm, AlgorithmParameters::OctetKey(_)) {
+                tracing::warn!(kid = %kid, "skipping a symmetric (oct) key in the configured JWKS - never accepted by this OAuth2 resource server check");
+                continue;
+            }
+            let Some(algorithm) = determine_algorithm(jwk) else {
+                tracing::warn!(kid = %kid, "skipping a JWK with an unsupported or undeterminable algorithm (only RS256, ES256, ES384 are supported)");
+                continue;
+            };
+            let decoding_key = match DecodingKey::from_jwk(jwk) {
+                Ok(key) => key,
+                Err(err) => {
+                    tracing::warn!(kid = %kid, error = %err, "skipping a JWK that failed to convert to a decoding key");
+                    continue;
+                }
+            };
+            keys.insert(
+                kid,
+                VerificationKey {
+                    decoding_key,
+                    algorithm,
+                },
+            );
+        }
+
+        if keys.is_empty() {
+            return Err(JwksError::NoUsableKeys { uri });
+        }
+
+        Ok(Self { config, keys })
+    }
+
+    /// Verify `token`: signature (against the key its header's `kid`
+    /// selects, validated using *that key's own* algorithm - see the
+    /// module doc's algorithm-confusion note, never the token header's own
+    /// `alg`), `exp` always, `nbf` when present, `iss`/`aud` when
+    /// configured, and (when configured) that the space-delimited `scope`
+    /// claim contains [`OAuth2Config::required_scope`]. Returns the
+    /// decoded claims on success.
+    pub fn verify(&self, token: &str) -> Result<serde_json::Value, VerifyError> {
+        let header =
+            decode_header(token).map_err(|err| VerifyError::InvalidToken(err.to_string()))?;
+        let kid = header.kid.ok_or(VerifyError::UnknownKid)?;
+        let key = self.keys.get(&kid).ok_or(VerifyError::UnknownKid)?;
+
+        let mut validation = Validation::new(key.algorithm);
+        // `nbf` is only actually checked (per `jsonwebtoken`'s own rule)
+        // when the claim is present at all - "exp always, nbf if present"
+        // per the design doc - so this is safe to always turn on.
+        validation.validate_nbf = true;
+        if let Some(issuer) = &self.config.issuer {
+            validation.set_issuer(&[issuer]);
+        }
+        if let Some(audience) = &self.config.audience {
+            validation.set_audience(&[audience]);
+        } else {
+            // `jsonwebtoken`'s `Validation` otherwise rejects *any* token
+            // that merely carries an `aud` claim once `validate_aud`
+            // defaults to `true` and no expected audience was set - not
+            // what "OAUTH2_AUDIENCE unset -> unchecked" (design doc) means.
+            validation.validate_aud = false;
+        }
+
+        let data = decode::<serde_json::Value>(token, &key.decoding_key, &validation)
+            .map_err(|err| VerifyError::InvalidToken(err.to_string()))?;
+
+        if let Some(required_scope) = &self.config.required_scope {
+            let has_scope = data
+                .claims
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .map(|scopes| scopes.split_whitespace().any(|s| s == required_scope))
+                .unwrap_or(false);
+            if !has_scope {
+                return Err(VerifyError::InsufficientScope(required_scope.clone()));
+            }
+        }
+
+        Ok(data.claims)
+    }
+}
+
+/// Determines the algorithm to verify `jwk` with: its own `alg` field when
+/// present (mapped to the three algorithms this verifier supports - any
+/// other declared `alg` is treated as unsupported, not silently
+/// re-inferred from `kty`/`crv` instead), else inferred from `kty`/`crv`
+/// (RSA -> RS256; EC P-256 -> ES256; EC P-384 -> ES384). `None` for
+/// anything else (RSA-family PSS variants, EC P-521, OKP/EdDSA, ...) -
+/// the caller skips that key rather than erroring the whole fetch.
+///
+/// This is the algorithm-confusion guard the module doc describes: the
+/// result is used as the *only* algorithm [`OAuth2Verifier::verify`]
+/// accepts for this `kid`, regardless of what a presented token's own
+/// header claims.
+fn determine_algorithm(jwk: &Jwk) -> Option<Algorithm> {
+    if let Some(key_algorithm) = jwk.common.key_algorithm {
+        return match key_algorithm {
+            KeyAlgorithm::RS256 => Some(Algorithm::RS256),
+            KeyAlgorithm::ES256 => Some(Algorithm::ES256),
+            KeyAlgorithm::ES384 => Some(Algorithm::ES384),
+            _ => None,
+        };
+    }
+    match &jwk.algorithm {
+        AlgorithmParameters::RSA(_) => Some(Algorithm::RS256),
+        AlgorithmParameters::EllipticCurve(params) => match params.curve {
+            EllipticCurve::P256 => Some(Algorithm::ES256),
+            EllipticCurve::P384 => Some(Algorithm::ES384),
+            _ => None,
+        },
+        _ => None,
+    }
+}
 
 #[cfg(test)]
 pub(crate) mod test_support {
@@ -59,7 +305,9 @@ pub(crate) mod test_support {
     /// already-parsed key) against the same, one implementation of "spin
     /// up a mock JWKS endpoint".
     pub async fn spawn_jwks_server(jwks: Value) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind 127.0.0.1:0");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind 127.0.0.1:0");
         let addr = listener.local_addr().expect("local_addr");
         let app = Router::new().route(
             "/jwks.json",
@@ -177,8 +425,8 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::*;
     use super::test_support::spawn_jwks_server as spawn_jwks;
+    use super::test_support::*;
     use super::{JwksError, OAuth2Config, OAuth2Verifier, VerifyError};
     use base64::Engine;
     use serde_json::json;
@@ -212,55 +460,85 @@ mod tests {
     async fn verify_rejects_an_unknown_kid() {
         let key = generate_key("key-1");
         let jwks_uri = spawn_jwks(json!({"keys": [ec_jwk(&key, None)]})).await;
-        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), config(jwks_uri)).await.expect("fetch JWKS");
+        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), config(jwks_uri))
+            .await
+            .expect("fetch JWKS");
 
         let stranger = generate_key("unregistered-kid");
         let token = sign_es256(&stranger, base_claims());
-        let err = verifier.verify(&token).expect_err("unregistered kid must be rejected");
-        assert!(matches!(err, VerifyError::UnknownKid), "expected UnknownKid, got {err:?}");
+        let err = verifier
+            .verify(&token)
+            .expect_err("unregistered kid must be rejected");
+        assert!(
+            matches!(err, VerifyError::UnknownKid),
+            "expected UnknownKid, got {err:?}"
+        );
     }
 
     #[tokio::test]
     async fn verify_rejects_a_token_with_an_invalid_signature() {
         let key = generate_key("key-1");
         let jwks_uri = spawn_jwks(json!({"keys": [ec_jwk(&key, None)]})).await;
-        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), config(jwks_uri)).await.expect("fetch JWKS");
+        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), config(jwks_uri))
+            .await
+            .expect("fetch JWKS");
 
         // Signed by a *different* key, but claiming the registered kid in
         // its header - a forged token, not just an unknown-key one.
         let forger = generate_key("key-1");
         let token = sign_es256(&forger, base_claims());
-        let err = verifier.verify(&token).expect_err("forged signature must be rejected");
-        assert!(matches!(err, VerifyError::InvalidToken(_)), "expected InvalidToken, got {err:?}");
+        let err = verifier
+            .verify(&token)
+            .expect_err("forged signature must be rejected");
+        assert!(
+            matches!(err, VerifyError::InvalidToken(_)),
+            "expected InvalidToken, got {err:?}"
+        );
     }
 
     #[tokio::test]
     async fn verify_rejects_an_expired_token() {
         let key = generate_key("key-1");
         let jwks_uri = spawn_jwks(json!({"keys": [ec_jwk(&key, None)]})).await;
-        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), config(jwks_uri)).await.expect("fetch JWKS");
+        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), config(jwks_uri))
+            .await
+            .expect("fetch JWKS");
 
         let token = sign_es256(&key, expired_claims());
-        let err = verifier.verify(&token).expect_err("expired token must be rejected");
-        assert!(matches!(err, VerifyError::InvalidToken(_)), "expected InvalidToken, got {err:?}");
+        let err = verifier
+            .verify(&token)
+            .expect_err("expired token must be rejected");
+        assert!(
+            matches!(err, VerifyError::InvalidToken(_)),
+            "expected InvalidToken, got {err:?}"
+        );
     }
 
     #[tokio::test]
     async fn construction_skips_a_symmetric_oct_key_but_keeps_a_valid_ec_key() {
         let ec_key = generate_key("ec-key");
-        let jwks_uri = spawn_jwks(json!({"keys": [oct_jwk("oct-key"), ec_jwk(&ec_key, None)]})).await;
+        let jwks_uri =
+            spawn_jwks(json!({"keys": [oct_jwk("oct-key"), ec_jwk(&ec_key, None)]})).await;
         let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), config(jwks_uri))
             .await
             .expect("fetch JWKS - one usable key remains after skipping the oct key");
 
         let good_token = sign_es256(&ec_key, base_claims());
-        assert!(verifier.verify(&good_token).is_ok(), "the real EC key must still work");
+        assert!(
+            verifier.verify(&good_token).is_ok(),
+            "the real EC key must still work"
+        );
 
         // The oct key's kid was never admitted into the verifier's key map.
         let oct_stand_in = generate_key("oct-key");
         let token_claiming_oct_kid = sign_es256(&oct_stand_in, base_claims());
-        let err = verifier.verify(&token_claiming_oct_kid).expect_err("the oct kid must not be usable");
-        assert!(matches!(err, VerifyError::UnknownKid), "expected UnknownKid, got {err:?}");
+        let err = verifier
+            .verify(&token_claiming_oct_kid)
+            .expect_err("the oct kid must not be usable");
+        assert!(
+            matches!(err, VerifyError::UnknownKid),
+            "expected UnknownKid, got {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -269,17 +547,24 @@ mod tests {
         let err = OAuth2Verifier::fetch(&reqwest::Client::new(), config(jwks_uri))
             .await
             .expect_err("a JWKS with only a symmetric key has no usable keys");
-        assert!(matches!(err, JwksError::NoUsableKeys { .. }), "expected NoUsableKeys, got {err:?}");
+        assert!(
+            matches!(err, JwksError::NoUsableKeys { .. }),
+            "expected NoUsableKeys, got {err:?}"
+        );
     }
 
     #[tokio::test]
     async fn construction_skips_a_key_with_an_unsupported_curve() {
         let key = generate_key("bad-curve-key");
-        let jwks_uri = spawn_jwks(json!({"keys": [unsupported_curve_jwk("bad-curve-key", &key)]})).await;
+        let jwks_uri =
+            spawn_jwks(json!({"keys": [unsupported_curve_jwk("bad-curve-key", &key)]})).await;
         let err = OAuth2Verifier::fetch(&reqwest::Client::new(), config(jwks_uri))
             .await
             .expect_err("a JWKS with only an unsupported-curve key has no usable keys");
-        assert!(matches!(err, JwksError::NoUsableKeys { .. }), "expected NoUsableKeys, got {err:?}");
+        assert!(
+            matches!(err, JwksError::NoUsableKeys { .. }),
+            "expected NoUsableKeys, got {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -293,7 +578,10 @@ mod tests {
         let err = OAuth2Verifier::fetch(&reqwest::Client::new(), config(unreachable_uri))
             .await
             .expect_err("an unreachable JWKS endpoint must fail construction");
-        assert!(matches!(err, JwksError::Fetch { .. }), "expected Fetch, got {err:?}");
+        assert!(
+            matches!(err, JwksError::Fetch { .. }),
+            "expected Fetch, got {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -302,13 +590,20 @@ mod tests {
         let jwks_uri = spawn_jwks(json!({"keys": [ec_jwk(&key, None)]})).await;
         let mut cfg = config(jwks_uri);
         cfg.issuer = Some("https://expected-issuer.example".to_string());
-        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), cfg).await.expect("fetch JWKS");
+        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), cfg)
+            .await
+            .expect("fetch JWKS");
 
         let mut claims = base_claims();
         claims["iss"] = json!("https://someone-else.example");
         let token = sign_es256(&key, claims);
-        let err = verifier.verify(&token).expect_err("mismatched issuer must be rejected");
-        assert!(matches!(err, VerifyError::InvalidToken(_)), "expected InvalidToken, got {err:?}");
+        let err = verifier
+            .verify(&token)
+            .expect_err("mismatched issuer must be rejected");
+        assert!(
+            matches!(err, VerifyError::InvalidToken(_)),
+            "expected InvalidToken, got {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -317,12 +612,17 @@ mod tests {
         let jwks_uri = spawn_jwks(json!({"keys": [ec_jwk(&key, None)]})).await;
         let mut cfg = config(jwks_uri);
         cfg.issuer = Some("https://expected-issuer.example".to_string());
-        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), cfg).await.expect("fetch JWKS");
+        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), cfg)
+            .await
+            .expect("fetch JWKS");
 
         let mut claims = base_claims();
         claims["iss"] = json!("https://expected-issuer.example");
         let token = sign_es256(&key, claims);
-        assert!(verifier.verify(&token).is_ok(), "matching issuer must be accepted");
+        assert!(
+            verifier.verify(&token).is_ok(),
+            "matching issuer must be accepted"
+        );
     }
 
     #[tokio::test]
@@ -331,13 +631,20 @@ mod tests {
         let jwks_uri = spawn_jwks(json!({"keys": [ec_jwk(&key, None)]})).await;
         let mut cfg = config(jwks_uri);
         cfg.audience = Some("expected-audience".to_string());
-        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), cfg).await.expect("fetch JWKS");
+        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), cfg)
+            .await
+            .expect("fetch JWKS");
 
         let mut claims = base_claims();
         claims["aud"] = json!("someone-else");
         let token = sign_es256(&key, claims);
-        let err = verifier.verify(&token).expect_err("mismatched audience must be rejected");
-        assert!(matches!(err, VerifyError::InvalidToken(_)), "expected InvalidToken, got {err:?}");
+        let err = verifier
+            .verify(&token)
+            .expect_err("mismatched audience must be rejected");
+        assert!(
+            matches!(err, VerifyError::InvalidToken(_)),
+            "expected InvalidToken, got {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -346,12 +653,17 @@ mod tests {
         let jwks_uri = spawn_jwks(json!({"keys": [ec_jwk(&key, None)]})).await;
         let mut cfg = config(jwks_uri);
         cfg.audience = Some("expected-audience".to_string());
-        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), cfg).await.expect("fetch JWKS");
+        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), cfg)
+            .await
+            .expect("fetch JWKS");
 
         let mut claims = base_claims();
         claims["aud"] = json!("expected-audience");
         let token = sign_es256(&key, claims);
-        assert!(verifier.verify(&token).is_ok(), "matching audience must be accepted");
+        assert!(
+            verifier.verify(&token).is_ok(),
+            "matching audience must be accepted"
+        );
     }
 
     /// Regression guard for a real `jsonwebtoken` footgun: `Validation`
@@ -365,7 +677,9 @@ mod tests {
     async fn verify_accepts_a_token_with_an_aud_claim_when_audience_is_not_configured() {
         let key = generate_key("key-1");
         let jwks_uri = spawn_jwks(json!({"keys": [ec_jwk(&key, None)]})).await;
-        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), config(jwks_uri)).await.expect("fetch JWKS");
+        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), config(jwks_uri))
+            .await
+            .expect("fetch JWKS");
 
         let mut claims = base_claims();
         claims["aud"] = json!("some-audience-nobody-configured");
@@ -382,13 +696,20 @@ mod tests {
         let jwks_uri = spawn_jwks(json!({"keys": [ec_jwk(&key, None)]})).await;
         let mut cfg = config(jwks_uri);
         cfg.required_scope = Some("catalog:read".to_string());
-        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), cfg).await.expect("fetch JWKS");
+        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), cfg)
+            .await
+            .expect("fetch JWKS");
 
         let mut claims = base_claims();
         claims["scope"] = json!("sparql:read other:scope");
         let token = sign_es256(&key, claims);
-        let err = verifier.verify(&token).expect_err("missing required scope must be rejected");
-        assert!(matches!(err, VerifyError::InsufficientScope(ref s) if s == "catalog:read"), "expected InsufficientScope, got {err:?}");
+        let err = verifier
+            .verify(&token)
+            .expect_err("missing required scope must be rejected");
+        assert!(
+            matches!(err, VerifyError::InsufficientScope(ref s) if s == "catalog:read"),
+            "expected InsufficientScope, got {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -397,12 +718,17 @@ mod tests {
         let jwks_uri = spawn_jwks(json!({"keys": [ec_jwk(&key, None)]})).await;
         let mut cfg = config(jwks_uri);
         cfg.required_scope = Some("catalog:read".to_string());
-        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), cfg).await.expect("fetch JWKS");
+        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), cfg)
+            .await
+            .expect("fetch JWKS");
 
         let mut claims = base_claims();
         claims["scope"] = json!("sparql:read catalog:read other:scope");
         let token = sign_es256(&key, claims);
-        assert!(verifier.verify(&token).is_ok(), "required scope present among several must be accepted");
+        assert!(
+            verifier.verify(&token).is_ok(),
+            "required scope present among several must be accepted"
+        );
     }
 
     #[tokio::test]
@@ -411,11 +737,18 @@ mod tests {
         let jwks_uri = spawn_jwks(json!({"keys": [ec_jwk(&key, None)]})).await;
         let mut cfg = config(jwks_uri);
         cfg.required_scope = Some("catalog:read".to_string());
-        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), cfg).await.expect("fetch JWKS");
+        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), cfg)
+            .await
+            .expect("fetch JWKS");
 
         let token = sign_es256(&key, base_claims());
-        let err = verifier.verify(&token).expect_err("no scope claim at all must be rejected when a scope is required");
-        assert!(matches!(err, VerifyError::InsufficientScope(_)), "expected InsufficientScope, got {err:?}");
+        let err = verifier
+            .verify(&token)
+            .expect_err("no scope claim at all must be rejected when a scope is required");
+        assert!(
+            matches!(err, VerifyError::InsufficientScope(_)),
+            "expected InsufficientScope, got {err:?}"
+        );
     }
 
     /// An explicit `alg` field on the JWK (rather than inference from
@@ -425,7 +758,9 @@ mod tests {
     async fn jwks_key_with_an_explicit_alg_field_verifies_correctly() {
         let key = generate_key("key-1");
         let jwks_uri = spawn_jwks(json!({"keys": [ec_jwk(&key, Some("ES256"))]})).await;
-        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), config(jwks_uri)).await.expect("fetch JWKS");
+        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), config(jwks_uri))
+            .await
+            .expect("fetch JWKS");
 
         let token = sign_es256(&key, base_claims());
         assert!(verifier.verify(&token).is_ok());
@@ -447,6 +782,8 @@ mod tests {
         let jwks_uri = spawn_jwks(json!({"keys": [rsa_jwk]})).await;
         OAuth2Verifier::fetch(&reqwest::Client::new(), config(jwks_uri))
             .await
-            .expect("an RSA JWK with no alg field must be inferred as RS256 and admitted, not skipped");
+            .expect(
+                "an RSA JWK with no alg field must be inferred as RS256 and admitted, not skipped",
+            );
     }
 }
