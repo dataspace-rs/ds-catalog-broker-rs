@@ -34,8 +34,8 @@ use serde_json::Value;
 /// already accepts (and, today, ignores the rest of).
 const DSP_CONTEXT_URL: &str = "https://w3id.org/dspace/2025/1/context.jsonld";
 
-/// Placeholder `Authorization` header value sent to a `requires_dcp = false`
-/// participant. Real Eclipse EDC's DSP catalog handler
+/// Placeholder `Authorization` header value sent to a `credential_protocol
+/// = "none"` participant. Real Eclipse EDC's DSP catalog handler
 /// (`DspRequestHandlerImpl`) returns `401` on a *missing* `Authorization`
 /// header unconditionally, before any `IdentityService` ever runs - even
 /// when that participant's own identity service (e.g. a no-op/permissive
@@ -116,40 +116,51 @@ async fn crawl_one(
         .post(&participant.catalog_request_url)
         .json(&request_body);
 
-    if participant.requires_dcp {
-        // Config validation (`ParticipantsConfig::validate`) already
-        // guarantees a `requires_dcp` participant has a `provider_did`
-        // and the file has a `[holder]` section, so a `holder` of `None`
-        // or a missing `provider_did` here means the caller built
-        // `ParticipantsConfig`/`HolderIdentity` inconsistently by hand
-        // rather than through that validation - still handled as a
-        // per-participant failure, not a panic, since a crawl cycle
-        // should never take down the process.
-        let holder = holder.ok_or_else(|| {
-            format!(
-                "participant '{}' requires_dcp but no holder identity is configured",
-                participant.id
-            )
-        })?;
-        let provider_did = participant.provider_did.as_deref().ok_or_else(|| {
-            format!(
-                "participant '{}' requires_dcp but has no provider_did",
-                participant.id
-            )
-        })?;
-        let token = holder.mint_self_issued_token(provider_did);
-        request = request.bearer_auth(token);
-    } else {
-        // See `OPEN_PARTICIPANT_PLACEHOLDER_AUTH`'s doc comment: real DSP
-        // servers (confirmed: Eclipse EDC) require *a* header to be
-        // present even when the participant enforces no real
-        // authentication - not `.bearer_auth(...)` (no "Bearer " prefix
-        // wanted here; a raw header value is what real EDC's DSP layer
-        // reads verbatim).
-        request = request.header(
-            reqwest::header::AUTHORIZATION,
-            OPEN_PARTICIPANT_PLACEHOLDER_AUTH,
-        );
+    match participant.credential_protocol {
+        config::CredentialProtocol::None => {
+            // See `OPEN_PARTICIPANT_PLACEHOLDER_AUTH`'s doc comment: real
+            // DSP servers (confirmed: Eclipse EDC) require *a* header to
+            // be present even when the participant enforces no real
+            // authentication - not `.bearer_auth(...)` (no "Bearer "
+            // prefix wanted here; a raw header value is what real EDC's
+            // DSP layer reads verbatim).
+            request = request.header(reqwest::header::AUTHORIZATION, OPEN_PARTICIPANT_PLACEHOLDER_AUTH);
+        }
+        config::CredentialProtocol::Dcp => {
+            // Config validation (`ParticipantsConfig::validate`) already
+            // guarantees a `Dcp` participant has a `provider_did` and the
+            // file has a `[holder]` section, so a `holder` of `None` or a
+            // missing `provider_did` here means the caller built
+            // `ParticipantsConfig`/`HolderIdentity` inconsistently by
+            // hand rather than through that validation - still handled
+            // as a per-participant failure, not a panic, since a crawl
+            // cycle should never take down the process.
+            let holder = holder.ok_or_else(|| {
+                format!("participant '{}' requires_dcp but no holder identity is configured", participant.id)
+            })?;
+            let provider_did = participant.provider_did.as_deref().ok_or_else(|| {
+                format!("participant '{}' requires_dcp but has no provider_did", participant.id)
+            })?;
+            let token = holder.mint_self_issued_token(provider_did);
+            request = request.bearer_auth(token);
+        }
+        config::CredentialProtocol::Oid4Vp => {
+            // Same defensive posture as the `Dcp` arm above: config
+            // validation already guarantees an `Oid4Vp` participant has
+            // an `oid4vp_response_uri` and the file has a `[holder]`
+            // section, but this still fails per-participant, not with a
+            // panic, if a hand-built config is inconsistent.
+            let holder = holder.ok_or_else(|| {
+                format!("participant '{}' requires oid4vp but no holder identity is configured", participant.id)
+            })?;
+            let response_uri = participant.oid4vp_response_uri.as_deref().ok_or_else(|| {
+                format!("participant '{}' requires oid4vp but has no oid4vp_response_uri", participant.id)
+            })?;
+            let access_token = oid4vp::present(http, &holder.key_pair, &holder.credential_jws, response_uri)
+                .await
+                .map_err(|e| format!("participant '{}' OID4VP presentation to {response_uri} failed: {e}", participant.id))?;
+            request = request.bearer_auth(access_token);
+        }
     }
 
     let response = request

@@ -138,7 +138,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use catalog_core::{Catalog, Dataset, NodeId};
-use crawler::{ParticipantEntry, crawl_once};
+use crawler::{CredentialProtocol, ParticipantEntry, crawl_once};
 use dcp_core::{
     DcpKeyPair, EXPECTED_CREDENTIAL_TYPE, HolderIdentity, PRESENTATION_QUERY_CONTEXT,
     PresentationQueryMessage, PresentationResponseMessage, decode_jws_unverified, did_web_to_url,
@@ -330,8 +330,9 @@ async fn spawn_open_participant() -> OpenParticipant {
             id: "open-participant".to_string(),
             name: "Open participant".to_string(),
             catalog_request_url: format!("http://{addr}/dsp/catalog/request"),
-            requires_dcp: false,
+            credential_protocol: CredentialProtocol::None,
             provider_did: None,
+            oid4vp_response_uri: None,
         },
         _server: server,
     }
@@ -638,8 +639,9 @@ async fn spawn_gated_participant() -> GatedParticipant {
             id: "gated-participant".to_string(),
             name: "DCP-gated participant".to_string(),
             catalog_request_url: format!("http://{addr}/dsp/catalog/request"),
-            requires_dcp: true,
+            credential_protocol: CredentialProtocol::Dcp,
             provider_did: Some(own_did),
+            oid4vp_response_uri: None,
         },
         _server: server,
     }
@@ -898,7 +900,8 @@ fn clone_entry(entry: &ParticipantEntry) -> ParticipantEntry {
         id: entry.id.clone(),
         name: entry.name.clone(),
         catalog_request_url: entry.catalog_request_url.clone(),
-        requires_dcp: entry.requires_dcp,
+        credential_protocol: entry.credential_protocol.clone(),
         provider_did: entry.provider_did.clone(),
+        oid4vp_response_uri: entry.oid4vp_response_uri.clone(),
     }
 }

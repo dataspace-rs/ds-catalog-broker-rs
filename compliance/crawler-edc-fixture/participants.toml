@@ -2,9 +2,10 @@
 #
 # Three independent, real Eclipse EDC 0.18.0 control-plane instances (see
 # run-instance.sh), each seeded with different, distinct dataset ids by
-# CatalogFixtureExtension. `requires_dcp = false` for all three - real
-# EDC-side DCP is explicitly out of scope for this step, see
-# ../benchmark-dcp-2026-08-27.md and ../crawler-edc-integration-test.md.
+# CatalogFixtureExtension. `credential_protocol` omitted (defaults to
+# "none") for all three - real EDC-side DCP/OID4VP is explicitly out of
+# scope for this step, see ../benchmark-dcp-2026-08-27.md and
+# ../crawler-edc-integration-test.md.
 #
 # Matches the schema in crates/crawler/src/config.rs
 # (ParticipantsConfig/ParticipantEntry).
@@ -15,16 +16,13 @@ interval_secs = 300
 id = "edc-instance-a"
 name = "Real EDC instance A"
 catalog_request_url = "http://127.0.0.1:18921/api/dsp/2025-1/catalog/request"
-requires_dcp = false
 
 [[participants]]
 id = "edc-instance-b"
 name = "Real EDC instance B"
 catalog_request_url = "http://127.0.0.1:19021/api/dsp/2025-1/catalog/request"
-requires_dcp = false
 
 [[participants]]
 id = "edc-instance-c"
 name = "Real EDC instance C"
 catalog_request_url = "http://127.0.0.1:19121/api/dsp/2025-1/catalog/request"
-requires_dcp = false

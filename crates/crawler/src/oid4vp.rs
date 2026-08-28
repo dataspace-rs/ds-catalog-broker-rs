@@ -9,11 +9,136 @@
 //! already uses for DCP's own T1, just wrapped in OID4VP's own wire shape
 //! (`vp_token` + `presentation_submission`, `direct_post`-style) instead
 //! of DCP's bearer-token-with-callback shape.
-//!
-//! RED STATE (docs/oid4vp-holder-2026-08-28.md TDD pass): only the tests
-//! below exist so far - `build_vp_token`, `build_presentation_submission`,
-//! `present`, and `Oid4VpError` are not implemented yet. This is expected
-//! not to compile.
+
+use dcp_core::{DcpKeyPair, now_secs, sign_jws};
+use serde_json::{Value, json};
+
+/// This project defines and expects exactly one credential type per
+/// participant (mirroring `dcp_core::EXPECTED_CREDENTIAL_TYPE`'s own
+/// single-credential-type assumption on the DCP side), not a general
+/// Presentation-Exchange client capable of satisfying an arbitrary
+/// requested `presentation_definition`. A participant requiring a
+/// different shape is out of scope for v1 - see
+/// `docs/oid4vp-holder-2026-08-28.md`.
+pub const DEFINITION_ID: &str = "federated-catalog-access";
+
+/// The fixed `descriptor_map` entry id every `presentation_submission`
+/// this crawler builds uses - see [`DEFINITION_ID`]'s doc comment.
+const DESCRIPTOR_ID: &str = "federated-catalog-access-credential";
+
+/// Builds a JWT-VP: a JWT enveloping the existing W3C VC-JWT
+/// `credential_jws` as its `vp` claim - the standard nesting for
+/// `vp_formats: jwt_vp_json`. `nonce` is a fresh UUID per call (this is
+/// v1's self-generated nonce, not a verifier-issued one - see the design
+/// doc's "Consequence, stated plainly" section on why that limits, rather
+/// than eliminates, replay protection). `exp` is `iat + 300` seconds,
+/// matching DCP's own T1/T2 lifetime.
+pub fn build_vp_token(key_pair: &DcpKeyPair, credential_jws: &str, audience: &str) -> String {
+    let now = now_secs();
+    let payload = json!({
+        "iss": key_pair.own_did,
+        "sub": key_pair.own_did,
+        "aud": audience,
+        "nonce": uuid::Uuid::new_v4().to_string(),
+        "iat": now,
+        "exp": now + 300,
+        "vp": {
+            "@context": ["https://www.w3.org/2018/credentials/v1"],
+            "type": ["VerifiablePresentation"],
+            "verifiableCredential": [credential_jws],
+        },
+    });
+    sign_jws(&payload, &key_pair.signing_key(), &key_pair.own_key_id)
+}
+
+/// Builds the DIF Presentation Exchange `presentation_submission` object
+/// OID4VP requires alongside `vp_token`, referencing one fixed,
+/// well-known `descriptor_map` entry - see [`DEFINITION_ID`]'s doc
+/// comment for why this is fixed rather than general. `id` is a fresh
+/// UUID per call (the submission's own id, distinct from the
+/// `definition_id` it answers).
+pub fn build_presentation_submission(definition_id: &str) -> Value {
+    json!({
+        "id": uuid::Uuid::new_v4().to_string(),
+        "definition_id": definition_id,
+        "descriptor_map": [{
+            "id": DESCRIPTOR_ID,
+            "format": "jwt_vp_json",
+            "path": "$",
+        }],
+    })
+}
+
+/// A failure presenting an OID4VP `vp_token` to a participant's
+/// `oid4vp_response_uri`. Returned by [`present`] rather than panicking -
+/// matching every other per-participant crawl-failure mode already in
+/// `crawler::crawl_one`.
+#[derive(Debug, thiserror::Error)]
+pub enum Oid4VpError {
+    #[error("request to {uri} failed: {source}")]
+    Transport {
+        uri: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("{uri} returned HTTP {status}")]
+    NonSuccessStatus { uri: String, status: reqwest::StatusCode },
+    #[error("response from {uri} was not valid JSON: {source}")]
+    MalformedResponse {
+        uri: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("response from {uri} had no access_token field")]
+    MissingAccessToken { uri: String },
+}
+
+/// Builds a `vp_token` + `presentation_submission` and POSTs them
+/// `application/x-www-form-urlencoded` to `response_uri` (`direct_post`
+/// style), returning the `access_token` a `200` JSON response is expected
+/// to carry - the short-lived credential this crawler then attaches as
+/// `Authorization: Bearer <access_token>` on the real
+/// `catalog_request_url` call, exactly parallel to how the DCP path
+/// attaches its self-issued T1.
+///
+/// `audience` for the `vp_token`'s `aud` claim is `response_uri` itself -
+/// v1 has no separate verifier `client_id` to address it to (see the
+/// design doc's single-shot-not-interactive scope), and the response
+/// endpoint is the only identifier of "who this presentation is for" this
+/// crawler actually has.
+pub async fn present(
+    http: &reqwest::Client,
+    key_pair: &DcpKeyPair,
+    credential_jws: &str,
+    response_uri: &str,
+) -> Result<String, Oid4VpError> {
+    let vp_token = build_vp_token(key_pair, credential_jws, response_uri);
+    let presentation_submission = build_presentation_submission(DEFINITION_ID).to_string();
+
+    let response = http
+        .post(response_uri)
+        .form(&[("vp_token", vp_token.as_str()), ("presentation_submission", presentation_submission.as_str())])
+        .send()
+        .await
+        .map_err(|source| Oid4VpError::Transport { uri: response_uri.to_string(), source })?;
+
+    if !response.status().is_success() {
+        return Err(Oid4VpError::NonSuccessStatus {
+            uri: response_uri.to_string(),
+            status: response.status(),
+        });
+    }
+
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|source| Oid4VpError::MalformedResponse { uri: response_uri.to_string(), source })?;
+
+    body.get("access_token")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| Oid4VpError::MissingAccessToken { uri: response_uri.to_string() })
+}
 
 #[cfg(test)]
 mod tests {
