@@ -10,12 +10,3 @@ Cargo.lock
 
 # OS
 .DS_Store
-
-# compliance/dcp-test-env: regenerable, throwaway key material and
-# compiled classes for the local DCP validation environment - never
-# commit private keys, even test ones. Regenerate via
-# compliance/dcp-test-env/README.md.
-compliance/dcp-test-env/keys/
-compliance/dcp-test-env/seed/out/
-compliance/dcp-test-env/seed/*.jar
-compliance/dcp-test-env/seed/*-classpath.txt
