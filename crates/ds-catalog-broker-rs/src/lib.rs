@@ -1565,6 +1565,95 @@ mod tests {
             "hasPolicy must be present but empty - catalog-core has no real ODRL policy model \
              yet (gap analysis §3.4)"
         );
+        assert_eq!(dataset.title, None);
+        assert_eq!(dataset.description, None);
+        assert_eq!(dataset.version, None);
+        assert_eq!(dataset.creator, None);
+        assert_eq!(dataset.thumbnail, None);
+        assert!(dataset.keywords.is_empty());
+    }
+
+    /// The other half of the fixture above: every optional descriptive
+    /// `catalog_core::Dataset.properties` entry
+    /// (`title`/`description`/`version`/`creatorName`/`thumbnail`/
+    /// `keywords`) populated, proving the whole chain - properties bag ->
+    /// `dataset_to_offer` -> this route's JSON response -> the real
+    /// `edc-federated-catalog-client` crate's own deserialization - actually
+    /// carries them through, not just that it compiles.
+    #[tokio::test]
+    async fn catalog_request_route_response_carries_optional_dataset_descriptors_through_to_the_real_client_type()
+     {
+        let state = test_state();
+        let mut catalog = participant_catalog("node-a", "cat-a", "DATASET-A");
+        let dataset = &mut catalog.datasets[0];
+        dataset
+            .properties
+            .insert("title".to_string(), "Soil Moisture Readings".to_string());
+        dataset.properties.insert(
+            "description".to_string(),
+            "Hourly soil moisture readings from field sensors.".to_string(),
+        );
+        dataset
+            .properties
+            .insert("version".to_string(), "1.2.0".to_string());
+        dataset
+            .properties
+            .insert("creatorName".to_string(), "Acme Sensors Inc.".to_string());
+        dataset.properties.insert(
+            "thumbnail".to_string(),
+            "https://example.org/thumbnails/soil-moisture.png".to_string(),
+        );
+        dataset
+            .properties
+            .insert("keywords".to_string(), "soil, moisture ,sensors".to_string());
+        state.cache.upsert(catalog).await.unwrap();
+
+        let app = build_router(state);
+        let response = app.oneshot(catalog_request(Body::empty())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let offers: Vec<FederatedCatalogOffer> = serde_json::from_slice(&body).expect(
+            "response body must deserialize with the real edc-federated-catalog-client crate's \
+             own FederatedCatalogOffer type",
+        );
+        assert_eq!(offers.len(), 1);
+        let dataset = &offers[0].dataset[0];
+
+        assert_eq!(dataset.title.as_deref(), Some("Soil Moisture Readings"));
+        assert_eq!(
+            dataset.description.as_deref(),
+            Some("Hourly soil moisture readings from field sensors.")
+        );
+        assert_eq!(dataset.version.as_deref(), Some("1.2.0"));
+        let creator = dataset
+            .creator
+            .as_ref()
+            .expect("creator must be present when creatorName is set");
+        assert_eq!(creator.name, "Acme Sensors Inc.");
+        assert_eq!(
+            creator.thumbnail.resource,
+            "https://example.org/thumbnails/soil-moisture.png",
+            "creator has no dedicated thumbnail property in the bag, so it reuses the \
+             dataset's own thumbnail"
+        );
+        assert_eq!(
+            dataset
+                .thumbnail
+                .as_ref()
+                .expect("thumbnail must be present")
+                .resource,
+            "https://example.org/thumbnails/soil-moisture.png"
+        );
+        assert_eq!(
+            dataset.keywords,
+            vec![
+                "soil".to_string(),
+                "moisture".to_string(),
+                "sensors".to_string()
+            ],
+            "keywords must be split on ',' and each entry trimmed"
+        );
     }
 
     /// The `datasets.id`/`=` `filterExpression` constraint - the exact

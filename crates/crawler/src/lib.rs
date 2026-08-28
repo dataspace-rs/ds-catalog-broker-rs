@@ -622,6 +622,93 @@ mod tests {
         );
     }
 
+    /// A dataset JSON object carrying every optional descriptive key this
+    /// crawler is expected to fold into `Dataset.properties`
+    /// (`title`/`description`/`version`/`creatorName`/`thumbnail`/
+    /// `keywords`) round-trips into that bag verbatim, under exactly those
+    /// keys - `keywords` stays a single comma-separated string, unsplit
+    /// (splitting is `ds-catalog-broker-rs::dataset_to_offer`'s job, not the
+    /// crawler's).
+    #[test]
+    fn dataset_optional_descriptive_properties_round_trip_into_properties_bag() {
+        let body = json!({
+            "@id": "cat-1",
+            "dataset": [{
+                "@id": "DATASET-A",
+                "title": "Soil Moisture Readings",
+                "description": "Hourly soil moisture readings from field sensors.",
+                "version": "1.2.0",
+                "creatorName": "Acme Sensors Inc.",
+                "thumbnail": "https://example.org/thumbnails/soil-moisture.png",
+                "keywords": "soil,moisture,sensors",
+                "distribution": [{"format": "application/json", "accessService": "svc-1"}]
+            }],
+            "service": [{"@id": "svc-1", "endpointURL": "https://example.org/dsp"}]
+        });
+        let participant = participant("descriptive-participant");
+        let catalog = parse_catalog_response(&body, &participant);
+
+        assert_eq!(catalog.datasets.len(), 1);
+        let props = &catalog.datasets[0].properties;
+        assert_eq!(
+            props.get("title").map(String::as_str),
+            Some("Soil Moisture Readings")
+        );
+        assert_eq!(
+            props.get("description").map(String::as_str),
+            Some("Hourly soil moisture readings from field sensors.")
+        );
+        assert_eq!(props.get("version").map(String::as_str), Some("1.2.0"));
+        assert_eq!(
+            props.get("creatorName").map(String::as_str),
+            Some("Acme Sensors Inc.")
+        );
+        assert_eq!(
+            props.get("thumbnail").map(String::as_str),
+            Some("https://example.org/thumbnails/soil-moisture.png")
+        );
+        assert_eq!(
+            props.get("keywords").map(String::as_str),
+            Some("soil,moisture,sensors"),
+            "keywords must be stored verbatim as one comma-separated string, not pre-split"
+        );
+    }
+
+    /// The backward-compatible half of the property above: a dataset JSON
+    /// object with none of the optional descriptive keys must still parse
+    /// exactly as before, with every one of those `properties` entries
+    /// simply absent (never a fabricated default).
+    #[test]
+    fn dataset_without_optional_descriptive_properties_leaves_them_absent_from_the_bag() {
+        let body = json!({
+            "@id": "cat-1",
+            "dataset": [{
+                "@id": "DATASET-A",
+                "distribution": [{"format": "application/json", "accessService": "svc-1"}]
+            }],
+            "service": [{"@id": "svc-1", "endpointURL": "https://example.org/dsp"}]
+        });
+        let participant = participant("no-descriptive-participant");
+        let catalog = parse_catalog_response(&body, &participant);
+
+        assert_eq!(catalog.datasets.len(), 1);
+        let props = &catalog.datasets[0].properties;
+        for key in [
+            "title",
+            "description",
+            "version",
+            "creatorName",
+            "thumbnail",
+            "keywords",
+        ] {
+            assert!(
+                !props.contains_key(key),
+                "expected no '{key}' property, found {:?}",
+                props.get(key)
+            );
+        }
+    }
+
     #[tokio::test]
     async fn crawl_once_records_a_failure_for_an_unreachable_participant_and_continues() {
         // Port 0 never accepts connections, so this participant's request
