@@ -694,14 +694,19 @@ mod tests {
         let jwks_uri = spawn_jwks(json!({"keys": [ec_jwk(&key, None)]})).await;
         let mut cfg = config(jwks_uri);
         cfg.audience = Some("expected-audience".to_string());
-        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), cfg).await.expect("fetch JWKS");
+        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), cfg)
+            .await
+            .expect("fetch JWKS");
 
         // base_claims() carries no `aud` at all.
         let token = sign_es256(&key, base_claims());
-        let err = verifier
-            .verify(&token)
-            .expect_err("a token with no aud claim at all must be rejected when an audience is configured");
-        assert!(matches!(err, VerifyError::InvalidToken(_)), "expected InvalidToken, got {err:?}");
+        let err = verifier.verify(&token).expect_err(
+            "a token with no aud claim at all must be rejected when an audience is configured",
+        );
+        assert!(
+            matches!(err, VerifyError::InvalidToken(_)),
+            "expected InvalidToken, got {err:?}"
+        );
     }
 
     /// Same bypass as above, for `iss`: a token with no `iss` claim at all
@@ -712,14 +717,19 @@ mod tests {
         let jwks_uri = spawn_jwks(json!({"keys": [ec_jwk(&key, None)]})).await;
         let mut cfg = config(jwks_uri);
         cfg.issuer = Some("https://expected-issuer.example".to_string());
-        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), cfg).await.expect("fetch JWKS");
+        let verifier = OAuth2Verifier::fetch(&reqwest::Client::new(), cfg)
+            .await
+            .expect("fetch JWKS");
 
         // base_claims() carries no `iss` at all.
         let token = sign_es256(&key, base_claims());
-        let err = verifier
-            .verify(&token)
-            .expect_err("a token with no iss claim at all must be rejected when an issuer is configured");
-        assert!(matches!(err, VerifyError::InvalidToken(_)), "expected InvalidToken, got {err:?}");
+        let err = verifier.verify(&token).expect_err(
+            "a token with no iss claim at all must be rejected when an issuer is configured",
+        );
+        assert!(
+            matches!(err, VerifyError::InvalidToken(_)),
+            "expected InvalidToken, got {err:?}"
+        );
     }
 
     /// Regression guard for a real `jsonwebtoken` footgun: `Validation`
