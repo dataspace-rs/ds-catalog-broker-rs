@@ -136,7 +136,10 @@ pub fn build_router(state: AppState) -> Router {
         // capability for crawling a DCP-gated remote participant. Both
         // routes 404 when no holder is configured.
         .route("/dsp/holder/did.json", get(holder_did_document_route))
-        .route("/dsp/holder/presentations/query", post(holder_presentation_query_route))
+        .route(
+            "/dsp/holder/presentations/query",
+            post(holder_presentation_query_route),
+        )
         .with_state(state)
 }
 
@@ -161,7 +164,10 @@ async fn holder_did_document_route(State(state): State<AppState>) -> impl IntoRe
 /// Missing/malformed `Authorization` header, or a token that fails
 /// verification: 401. Otherwise: 200 with a `PresentationResponseMessage`
 /// body wrapping this connector's own stored credential.
-async fn holder_presentation_query_route(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+async fn holder_presentation_query_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let Some(holder) = &state.holder else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -292,7 +298,10 @@ async fn sparql_route_post(
 /// `application/*`) - any `;q=...` parameter is ignored, since there is
 /// only one representation on offer here to weight against.
 fn accepts_sparql_results_json(headers: &HeaderMap) -> bool {
-    let Some(accept) = headers.get(axum::http::header::ACCEPT).and_then(|v| v.to_str().ok()) else {
+    let Some(accept) = headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+    else {
         return true;
     };
     accept.split(',').any(|range| {
@@ -322,7 +331,11 @@ fn accepts_sparql_results_json(headers: &HeaderMap) -> bool {
 ///   comments): 400 Bad Request with a plain-text explanation - these are
 ///   all the caller's own query's fault.
 /// - Otherwise: 200 with an `application/sparql-results+json` body.
-async fn sparql_route(state: AppState, headers: HeaderMap, query: Option<String>) -> axum::response::Response {
+async fn sparql_route(
+    state: AppState,
+    headers: HeaderMap,
+    query: Option<String>,
+) -> axum::response::Response {
     let Some(sparql) = &state.sparql else {
         return (
             StatusCode::NOT_IMPLEMENTED,
@@ -344,7 +357,10 @@ async fn sparql_route(state: AppState, headers: HeaderMap, query: Option<String>
     let query = match query.filter(|q| !q.trim().is_empty()) {
         Some(query) => query,
         None => {
-            return (StatusCode::BAD_REQUEST, "missing required 'query' parameter".to_string())
+            return (
+                StatusCode::BAD_REQUEST,
+                "missing required 'query' parameter".to_string(),
+            )
                 .into_response();
         }
     };
@@ -356,9 +372,11 @@ async fn sparql_route(state: AppState, headers: HeaderMap, query: Option<String>
             body,
         )
             .into_response(),
-        Err(err @ (SparqlError::Parse(_) | SparqlError::Evaluation(_) | SparqlError::UnsupportedGraphResult)) => {
-            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
-        }
+        Err(
+            err @ (SparqlError::Parse(_)
+            | SparqlError::Evaluation(_)
+            | SparqlError::UnsupportedGraphResult),
+        ) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
         Err(err @ SparqlError::Serialize(_)) => {
             tracing::error!(error = %err, "failed to serialize SPARQL results");
             (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
@@ -486,7 +504,8 @@ mod tests {
     /// router" coverage against the surface that replaced it.)
     #[tokio::test]
     async fn catalog_endpoint_serves_data_from_the_oxigraph_backend() {
-        let cache: Arc<dyn CatalogCache> = Arc::new(rdf_store::oxigraph_backend::OxigraphCatalogCache::in_memory().unwrap());
+        let cache: Arc<dyn CatalogCache> =
+            Arc::new(rdf_store::oxigraph_backend::OxigraphCatalogCache::in_memory().unwrap());
         seed_sample_catalog(&*cache).await.unwrap();
         let state = AppState::new(cache);
 
@@ -505,7 +524,11 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let parsed: CatalogListResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed.catalogs.len(), 1);
-        let mut ids: Vec<&str> = parsed.catalogs[0].datasets.iter().map(|d| d.id.as_str()).collect();
+        let mut ids: Vec<&str> = parsed.catalogs[0]
+            .datasets
+            .iter()
+            .map(|d| d.id.as_str())
+            .collect();
         ids.sort_unstable();
         assert_eq!(ids, vec!["CAT0101", "CAT0102"]);
     }
@@ -542,7 +565,8 @@ mod tests {
     /// `CRAWLER_CONFIG_PATH` is set: a real Oxigraph-backed cache, with
     /// `AppState::sparql` pointed at that same store so `/sparql` is live.
     fn sparql_test_state() -> AppState {
-        let store = Arc::new(rdf_store::oxigraph_backend::OxigraphCatalogCache::in_memory().unwrap());
+        let store =
+            Arc::new(rdf_store::oxigraph_backend::OxigraphCatalogCache::in_memory().unwrap());
         let cache: Arc<dyn CatalogCache> = store.clone();
         AppState::new(cache).with_sparql(Some(store))
     }
@@ -610,7 +634,10 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
-            response.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
             "application/sparql-results+json"
         );
 
@@ -618,9 +645,15 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed["head"]["vars"], serde_json::json!(["dataset"]));
         let bindings = parsed["results"]["bindings"].as_array().unwrap();
-        assert_eq!(bindings.len(), 2, "expected one dataset per seeded participant, got {parsed}");
-        let mut dataset_iris: Vec<&str> =
-            bindings.iter().map(|b| b["dataset"]["value"].as_str().unwrap()).collect();
+        assert_eq!(
+            bindings.len(),
+            2,
+            "expected one dataset per seeded participant, got {parsed}"
+        );
+        let mut dataset_iris: Vec<&str> = bindings
+            .iter()
+            .map(|b| b["dataset"]["value"].as_str().unwrap())
+            .collect();
         dataset_iris.sort_unstable();
         assert!(dataset_iris[0].contains("node-a") && dataset_iris[0].contains("DATASET-A"));
         assert!(dataset_iris[1].contains("node-b") && dataset_iris[1].contains("DATASET-B"));
@@ -662,7 +695,12 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let bindings = parsed["results"]["bindings"].as_array().unwrap();
         assert_eq!(bindings.len(), 1);
-        assert!(bindings[0]["dataset"]["value"].as_str().unwrap().contains("DATASET-A"));
+        assert!(
+            bindings[0]["dataset"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("DATASET-A")
+        );
     }
 
     /// A real SPARQL ASK, through the HTTP route, producing the
@@ -713,7 +751,12 @@ mod tests {
     async fn sparql_endpoint_requires_a_query_parameter() {
         let app = build_router(sparql_test_state());
         let response = app
-            .oneshot(Request::builder().uri("/sparql").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/sparql")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);

@@ -79,7 +79,10 @@ pub async fn crawl_once(
                 Ok(()) => summary.succeeded += 1,
                 Err(err) => {
                     summary.failed += 1;
-                    summary.failures.push((participant.id.clone(), format!("failed to cache crawl result: {err}")));
+                    summary.failures.push((
+                        participant.id.clone(),
+                        format!("failed to cache crawl result: {err}"),
+                    ));
                 }
             },
             Err(err) => {
@@ -105,7 +108,9 @@ async fn crawl_one(
         "@type": "CatalogRequestMessage",
     });
 
-    let mut request = http.post(&participant.catalog_request_url).json(&request_body);
+    let mut request = http
+        .post(&participant.catalog_request_url)
+        .json(&request_body);
 
     if participant.requires_dcp {
         // Config validation (`ParticipantsConfig::validate`) already
@@ -117,10 +122,16 @@ async fn crawl_one(
         // per-participant failure, not a panic, since a crawl cycle
         // should never take down the process.
         let holder = holder.ok_or_else(|| {
-            format!("participant '{}' requires_dcp but no holder identity is configured", participant.id)
+            format!(
+                "participant '{}' requires_dcp but no holder identity is configured",
+                participant.id
+            )
         })?;
         let provider_did = participant.provider_did.as_deref().ok_or_else(|| {
-            format!("participant '{}' requires_dcp but has no provider_did", participant.id)
+            format!(
+                "participant '{}' requires_dcp but has no provider_did",
+                participant.id
+            )
         })?;
         let token = holder.mint_self_issued_token(provider_did);
         request = request.bearer_auth(token);
@@ -131,7 +142,10 @@ async fn crawl_one(
         // authentication - not `.bearer_auth(...)` (no "Bearer " prefix
         // wanted here; a raw header value is what real EDC's DSP layer
         // reads verbatim).
-        request = request.header(reqwest::header::AUTHORIZATION, OPEN_PARTICIPANT_PLACEHOLDER_AUTH);
+        request = request.header(
+            reqwest::header::AUTHORIZATION,
+            OPEN_PARTICIPANT_PLACEHOLDER_AUTH,
+        );
     }
 
     let response = request
@@ -147,10 +161,12 @@ async fn crawl_one(
         ));
     }
 
-    let body: Value = response
-        .json()
-        .await
-        .map_err(|e| format!("malformed JSON response from {}: {e}", participant.catalog_request_url))?;
+    let body: Value = response.json().await.map_err(|e| {
+        format!(
+            "malformed JSON response from {}: {e}",
+            participant.catalog_request_url
+        )
+    })?;
 
     Ok(parse_catalog_response(&body, participant))
 }
@@ -190,7 +206,10 @@ fn parse_catalog_response(value: &Value, participant: &ParticipantEntry) -> Cata
         .unwrap_or_else(|| format!("urn:uuid:{}", uuid::Uuid::new_v4()));
 
     let mut catalog = Catalog::new(id, NodeId::new(participant.id.clone()));
-    catalog.participant_id = value.get("participantId").and_then(Value::as_str).map(str::to_string);
+    catalog.participant_id = value
+        .get("participantId")
+        .and_then(Value::as_str)
+        .map(str::to_string);
 
     collect_datasets_and_services(value, &mut catalog);
 
@@ -208,10 +227,10 @@ fn collect_datasets_and_services(value: &Value, catalog: &mut Catalog) {
     // already listed here.
     if let Some(services) = value.get("service").and_then(Value::as_array) {
         for service_value in services {
-            if let Some(service) = parse_data_service(service_value) {
-                if !catalog.data_services.iter().any(|s| s.id == service.id) {
-                    catalog.data_services.push(service);
-                }
+            if let Some(service) = parse_data_service(service_value)
+                && !catalog.data_services.iter().any(|s| s.id == service.id)
+            {
+                catalog.data_services.push(service);
             }
         }
     }
@@ -232,7 +251,8 @@ fn collect_datasets_and_services(value: &Value, catalog: &mut Catalog) {
                 distributions: Vec::new(),
             };
 
-            if let Some(distributions) = dataset_value.get("distribution").and_then(Value::as_array) {
+            if let Some(distributions) = dataset_value.get("distribution").and_then(Value::as_array)
+            {
                 for distribution_value in distributions {
                     let format = distribution_value
                         .get("format")
@@ -249,17 +269,20 @@ fn collect_datasets_and_services(value: &Value, catalog: &mut Catalog) {
                                 .and_then(Value::as_str)
                                 .unwrap_or_default()
                                 .to_string();
-                            if let Some(service) = parse_data_service(access_service_value) {
-                                if !catalog.data_services.iter().any(|s| s.id == service.id) {
-                                    catalog.data_services.push(service);
-                                }
+                            if let Some(service) = parse_data_service(access_service_value)
+                                && !catalog.data_services.iter().any(|s| s.id == service.id)
+                            {
+                                catalog.data_services.push(service);
                             }
                             id
                         }
                         _ => String::new(),
                     };
 
-                    dataset.distributions.push(Distribution { format, access_service });
+                    dataset.distributions.push(Distribution {
+                        format,
+                        access_service,
+                    });
                 }
             }
 
@@ -283,9 +306,20 @@ fn parse_data_service(value: &Value) -> Option<DataService> {
         .or_else(|| value.get("id"))
         .and_then(Value::as_str)?
         .to_string();
-    let endpoint_url = value.get("endpointURL").and_then(Value::as_str).unwrap_or_default().to_string();
-    let endpoint_description = value.get("endpointDescription").and_then(Value::as_str).map(str::to_string);
-    Some(DataService { id, endpoint_url, endpoint_description })
+    let endpoint_url = value
+        .get("endpointURL")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let endpoint_description = value
+        .get("endpointDescription")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Some(DataService {
+        id,
+        endpoint_url,
+        endpoint_description,
+    })
 }
 
 /// Spawn a background task that runs [`crawl_once`] every
@@ -387,22 +421,37 @@ mod tests {
 
         assert_eq!(catalog.id, "6d3d7a0c-bf06-4160-839f-853350446179");
         assert_eq!(catalog.origin_node, NodeId::new("edc-participant"));
-        assert_eq!(catalog.participant_id.as_deref(), Some("CONNECTOR_UNDER_TEST"));
+        assert_eq!(
+            catalog.participant_id.as_deref(),
+            Some("CONNECTOR_UNDER_TEST")
+        );
 
         assert_eq!(catalog.datasets.len(), 1);
         let dataset = &catalog.datasets[0];
         assert_eq!(dataset.id, "CAT0101");
         assert_eq!(dataset.distributions.len(), 1);
         assert_eq!(dataset.distributions[0].format, "HttpData-PULL");
-        assert_eq!(dataset.distributions[0].access_service, "5ee7e0fa-a2bc-4251-bab3-d3a1454dcfc8");
+        assert_eq!(
+            dataset.distributions[0].access_service,
+            "5ee7e0fa-a2bc-4251-bab3-d3a1454dcfc8"
+        );
 
         // The nested accessService object's endpointURL isn't lost: it's
         // folded into data_services (deduplicated against the top-level
         // `service` array entry sharing the same id).
         assert_eq!(catalog.data_services.len(), 1);
-        assert_eq!(catalog.data_services[0].id, "5ee7e0fa-a2bc-4251-bab3-d3a1454dcfc8");
-        assert_eq!(catalog.data_services[0].endpoint_url, "http://localhost:8082/api/dsp/2025-1");
-        assert_eq!(catalog.data_services[0].endpoint_description.as_deref(), Some("dspace:connector"));
+        assert_eq!(
+            catalog.data_services[0].id,
+            "5ee7e0fa-a2bc-4251-bab3-d3a1454dcfc8"
+        );
+        assert_eq!(
+            catalog.data_services[0].endpoint_url,
+            "http://localhost:8082/api/dsp/2025-1"
+        );
+        assert_eq!(
+            catalog.data_services[0].endpoint_description.as_deref(),
+            Some("dspace:connector")
+        );
     }
 
     #[test]
@@ -419,9 +468,15 @@ mod tests {
         let catalog = parse_catalog_response(&body, &participant);
 
         assert_eq!(catalog.datasets.len(), 1);
-        assert_eq!(catalog.datasets[0].distributions[0].access_service, "sample-data-service");
+        assert_eq!(
+            catalog.datasets[0].distributions[0].access_service,
+            "sample-data-service"
+        );
         assert_eq!(catalog.data_services.len(), 1);
-        assert_eq!(catalog.data_services[0].endpoint_url, "https://example.org/dsp");
+        assert_eq!(
+            catalog.data_services[0].endpoint_url,
+            "https://example.org/dsp"
+        );
     }
 
     #[test]
@@ -502,16 +557,29 @@ mod tests {
         // own model - nested sub-participant identity isn't preserved,
         // only that the data isn't dropped. The outer wrapper's own
         // participantId is what's kept.
-        assert_eq!(catalog.origin_node, NodeId::new("upstream-aggregator-participant"));
-        assert_eq!(catalog.participant_id.as_deref(), Some("urn:connector:upstream-aggregator"));
+        assert_eq!(
+            catalog.origin_node,
+            NodeId::new("upstream-aggregator-participant")
+        );
+        assert_eq!(
+            catalog.participant_id.as_deref(),
+            Some("urn:connector:upstream-aggregator")
+        );
 
         let mut dataset_ids: Vec<&str> = catalog.datasets.iter().map(|d| d.id.as_str()).collect();
         dataset_ids.sort();
         assert_eq!(dataset_ids, vec!["A1", "B1"]);
 
-        let mut service_ids: Vec<&str> = catalog.data_services.iter().map(|s| s.id.as_str()).collect();
+        let mut service_ids: Vec<&str> = catalog
+            .data_services
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
         service_ids.sort();
-        assert_eq!(service_ids, vec!["node-a-data-service", "node-b-data-service"]);
+        assert_eq!(
+            service_ids,
+            vec!["node-a-data-service", "node-b-data-service"]
+        );
     }
 
     #[tokio::test]
@@ -542,7 +610,12 @@ mod tests {
         gated.provider_did = Some("did:web:localhost%3A19002:dsp".to_string());
         let http = reqwest::Client::new();
 
-        let err = crawl_one(&http, &gated, None).await.expect_err("should fail without a holder");
-        assert!(err.contains("no holder identity is configured"), "unexpected error: {err}");
+        let err = crawl_one(&http, &gated, None)
+            .await
+            .expect_err("should fail without a holder");
+        assert!(
+            err.contains("no holder identity is configured"),
+            "unexpected error: {err}"
+        );
     }
 }

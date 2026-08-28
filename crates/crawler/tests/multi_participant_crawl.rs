@@ -41,7 +41,7 @@
 //! never answer `CatalogRequestMessage` as a Provider, gated or not. Both
 //! O and P stand in for *some other, real* participant's Catalog Service
 //! - a role this product's own binary no longer plays at all, not even in
-//! `DspAuthMode::Disabled`'s "open" shape.
+//!   `DspAuthMode::Disabled`'s "open" shape.
 //!
 //! Without a replacement, that deletion would silently take this test's
 //! only real coverage of the crawler's outbound HTTP fetch (O) and DCP
@@ -140,9 +140,10 @@ use axum::{Json, Router};
 use catalog_core::{Catalog, Dataset, NodeId};
 use crawler::{ParticipantEntry, crawl_once};
 use dcp_core::{
-    DcpKeyPair, EXPECTED_CREDENTIAL_TYPE, HolderIdentity, PRESENTATION_QUERY_CONTEXT, PresentationQueryMessage,
-    PresentationResponseMessage, decode_jws_unverified, did_web_to_url, find_verifying_key, now_secs, resolve_did,
-    service_endpoint_url, sign_jws, verify_jws_signature,
+    DcpKeyPair, EXPECTED_CREDENTIAL_TYPE, HolderIdentity, PRESENTATION_QUERY_CONTEXT,
+    PresentationQueryMessage, PresentationResponseMessage, decode_jws_unverified, did_web_to_url,
+    find_verifying_key, now_secs, resolve_did, service_endpoint_url, sign_jws,
+    verify_jws_signature,
 };
 use ds_catalog_broker_rs::{AppState, build_router};
 use rdf_store::memory::InMemoryCatalogCache;
@@ -160,7 +161,9 @@ const SCOPE: &str = "org.eclipse.dspace.dcp.vc.type:FederatedCatalogAccessCreden
 const MOCK_PROVIDER_DID_PATH_SEGMENT: &str = "dsp";
 
 async fn bind_localhost() -> (TcpListener, SocketAddr) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind 127.0.0.1:0");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind 127.0.0.1:0");
     let addr = listener.local_addr().expect("local_addr");
     (listener, addr)
 }
@@ -195,7 +198,12 @@ fn dataset(id: &str) -> Dataset {
 async fn resolve_did_reaches_the_real_holder_dsp_did_route() {
     let (listener, addr) = bind_localhost().await;
     let host = format!("127.0.0.1:{}", addr.port());
-    let holder = Arc::new(HolderIdentity::new(host.clone(), true, "unused.unused.unused".to_string(), SCOPE.to_string()));
+    let holder = Arc::new(HolderIdentity::new(
+        host.clone(),
+        true,
+        "unused.unused.unused".to_string(),
+        SCOPE.to_string(),
+    ));
     let holder_did = holder.key_pair.own_did.clone();
 
     let state = AppState::new(Arc::new(InMemoryCatalogCache::new())).with_holder(Some(holder));
@@ -207,8 +215,16 @@ async fn resolve_did_reaches_the_real_holder_dsp_did_route() {
 
     let holder_url = did_web_to_url(&holder_did, true).expect("did_web_to_url");
     assert_eq!(holder_url, format!("{base}/dsp/holder/did.json"));
-    let holder_response = client.get(&holder_url).send().await.expect("GET holder DID doc");
-    assert_eq!(holder_response.status(), reqwest::StatusCode::OK, "computed holder DID URL reaches the real route");
+    let holder_response = client
+        .get(&holder_url)
+        .send()
+        .await
+        .expect("GET holder DID doc");
+    assert_eq!(
+        holder_response.status(),
+        reqwest::StatusCode::OK,
+        "computed holder DID URL reaches the real route"
+    );
 }
 
 /// Regression test for bug #2: `HolderIdentity::own_did_document` now
@@ -221,7 +237,12 @@ async fn resolve_did_reaches_the_real_holder_dsp_did_route() {
 async fn credential_service_endpoint_is_the_real_reachable_presentation_api() {
     let (listener, addr) = bind_localhost().await;
     let host = format!("127.0.0.1:{}", addr.port());
-    let holder = Arc::new(HolderIdentity::new(host.clone(), true, "unused.unused.unused".to_string(), SCOPE.to_string()));
+    let holder = Arc::new(HolderIdentity::new(
+        host.clone(),
+        true,
+        "unused.unused.unused".to_string(),
+        SCOPE.to_string(),
+    ));
     let published_endpoint = holder
         .own_did_document()
         .get("service")
@@ -231,7 +252,11 @@ async fn credential_service_endpoint_is_the_real_reachable_presentation_api() {
         .and_then(|v| v.as_str())
         .expect("CredentialService entry with a serviceEndpoint")
         .to_string();
-    assert_eq!(published_endpoint, format!("http://{host}/dsp/holder"), "published endpoint is the base URL");
+    assert_eq!(
+        published_endpoint,
+        format!("http://{host}/dsp/holder"),
+        "published endpoint is the base URL"
+    );
 
     let state = AppState::new(Arc::new(InMemoryCatalogCache::new())).with_holder(Some(holder));
     let app = build_router(state);
@@ -239,11 +264,18 @@ async fn credential_service_endpoint_is_the_real_reachable_presentation_api() {
 
     let client = reqwest::Client::new();
     let query_url = format!("{published_endpoint}/presentations/query");
-    assert_eq!(query_url, format!("http://{host}/dsp/holder/presentations/query"));
+    assert_eq!(
+        query_url,
+        format!("http://{host}/dsp/holder/presentations/query")
+    );
 
     // No auth header: 401 (the real handler ran and rejected it), not 404
     // (which would mean the route doesn't exist at this address).
-    let response = client.post(&query_url).send().await.expect("POST presentations/query");
+    let response = client
+        .post(&query_url)
+        .send()
+        .await
+        .expect("POST presentations/query");
     assert_eq!(
         response.status(),
         reqwest::StatusCode::UNAUTHORIZED,
@@ -261,7 +293,7 @@ struct OpenParticipant {
 /// `POST /dsp/catalog/request` - the mock open provider's DSP catalog
 /// endpoint. Unlike the gated provider below, this answers unconditionally
 /// - no `Authorization` header is required or inspected, matching a real
-/// open (unauthenticated) DSP Catalog Service.
+///   open (unauthenticated) DSP Catalog Service.
 async fn mock_open_provider_catalog_request(State(body): State<Arc<Value>>) -> impl IntoResponse {
     Json((*body).clone())
 }
@@ -286,7 +318,10 @@ async fn spawn_open_participant() -> OpenParticipant {
     }));
 
     let app = Router::new()
-        .route("/dsp/catalog/request", post(mock_open_provider_catalog_request))
+        .route(
+            "/dsp/catalog/request",
+            post(mock_open_provider_catalog_request),
+        )
         .with_state(body);
     let server = spawn(listener, app);
 
@@ -334,7 +369,9 @@ struct MockGatedProviderState {
 /// can resolve the key that signs it. Mirrors what the real, now-being-
 /// removed verifier's `own_did_document_route` served, but is this test's
 /// own, independent handler.
-async fn mock_provider_did_document(State(state): State<Arc<MockGatedProviderState>>) -> impl IntoResponse {
+async fn mock_provider_did_document(
+    State(state): State<Arc<MockGatedProviderState>>,
+) -> impl IntoResponse {
     Json(state.key_pair.did_document(&[]))
 }
 
@@ -344,7 +381,10 @@ async fn mock_provider_did_document(State(state): State<Arc<MockGatedProviderSta
 /// signature checks and DID resolution, not a stub), and the response is
 /// this participant's seeded dataset list, filtered to what the verified
 /// caller's credential(s) actually grant.
-async fn mock_provider_catalog_request(State(state): State<Arc<MockGatedProviderState>>, headers: HeaderMap) -> impl IntoResponse {
+async fn mock_provider_catalog_request(
+    State(state): State<Arc<MockGatedProviderState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let token = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -384,10 +424,20 @@ async fn mock_provider_catalog_request(State(state): State<Arc<MockGatedProvider
 /// the returned VerifiablePresentation, and each embedded Verifiable
 /// Credential against its own issuer), and the same expired-credential
 /// failure semantics as bug #3 above.
-async fn mock_verify_dcp_bearer_token(token: &str, state: &MockGatedProviderState) -> Result<HashSet<String>, String> {
+async fn mock_verify_dcp_bearer_token(
+    token: &str,
+    state: &MockGatedProviderState,
+) -> Result<HashSet<String>, String> {
     let (_, header_t1, payload_t1) = decode_jws_unverified(token)?;
-    let holder_did = payload_t1.get("iss").and_then(Value::as_str).ok_or("token has no iss")?.to_string();
-    let kid_t1 = header_t1.get("kid").and_then(Value::as_str).ok_or("token has no kid")?;
+    let holder_did = payload_t1
+        .get("iss")
+        .and_then(Value::as_str)
+        .ok_or("token has no iss")?
+        .to_string();
+    let kid_t1 = header_t1
+        .get("kid")
+        .and_then(Value::as_str)
+        .ok_or("token has no kid")?;
 
     let holder_doc = resolve_did(&state.http, &holder_did, state.insecure_http).await?;
     let holder_key = find_verifying_key(&holder_doc, kid_t1)?;
@@ -395,7 +445,10 @@ async fn mock_verify_dcp_bearer_token(token: &str, state: &MockGatedProviderStat
 
     let aud = payload_t1.get("aud").and_then(Value::as_str).unwrap_or("");
     if aud != state.key_pair.own_did {
-        return Err(format!("token audience '{aud}' does not match this mock provider's DID '{}'", state.key_pair.own_did));
+        return Err(format!(
+            "token audience '{aud}' does not match this mock provider's DID '{}'",
+            state.key_pair.own_did
+        ));
     }
 
     let exp = payload_t1.get("exp").and_then(Value::as_u64).unwrap_or(0);
@@ -422,7 +475,11 @@ async fn mock_verify_dcp_bearer_token(token: &str, state: &MockGatedProviderStat
         "exp": now + 300,
         "jti": Uuid::new_v4().to_string(),
     });
-    let repackaged_token = sign_jws(&repackaged_payload, &state.key_pair.signing_key(), &state.key_pair.own_key_id);
+    let repackaged_token = sign_jws(
+        &repackaged_payload,
+        &state.key_pair.signing_key(),
+        &state.key_pair.own_key_id,
+    );
 
     let credential_service = service_endpoint_url(&holder_doc, "CredentialService")?;
     let query_url = format!("{credential_service}/presentations/query");
@@ -444,13 +501,21 @@ async fn mock_verify_dcp_bearer_token(token: &str, state: &MockGatedProviderStat
         let body = response.text().await.unwrap_or_default();
         return Err(format!("presentation query returned HTTP {status}: {body}"));
     }
-    let presentation_response: PresentationResponseMessage =
-        response.json().await.map_err(|e| format!("malformed presentation response: {e}"))?;
-    let vp_jws = presentation_response.presentation.first().ok_or("presentation response had no presentation")?;
+    let presentation_response: PresentationResponseMessage = response
+        .json()
+        .await
+        .map_err(|e| format!("malformed presentation response: {e}"))?;
+    let vp_jws = presentation_response
+        .presentation
+        .first()
+        .ok_or("presentation response had no presentation")?;
 
     // Verify the VP itself (signed by the holder).
     let (_, vp_header, vp_payload) = decode_jws_unverified(vp_jws)?;
-    let vp_kid = vp_header.get("kid").and_then(Value::as_str).ok_or("VP has no kid")?;
+    let vp_kid = vp_header
+        .get("kid")
+        .and_then(Value::as_str)
+        .ok_or("VP has no kid")?;
     let vp_key = find_verifying_key(&holder_doc, vp_kid)?;
     verify_jws_signature(vp_jws, &vp_key)?;
 
@@ -467,10 +532,19 @@ async fn mock_verify_dcp_bearer_token(token: &str, state: &MockGatedProviderStat
     let mut catalog_access = HashSet::new();
     let mut had_expired_credential = false;
     for vc_value in &vc_jws_list {
-        let vc_jws = vc_value.as_str().ok_or("verifiableCredential entry was not a string")?;
+        let vc_jws = vc_value
+            .as_str()
+            .ok_or("verifiableCredential entry was not a string")?;
         let (_, vc_header, vc_payload) = decode_jws_unverified(vc_jws)?;
-        let issuer_did = vc_payload.get("iss").and_then(Value::as_str).ok_or("VC has no iss")?.to_string();
-        let vc_kid = vc_header.get("kid").and_then(Value::as_str).ok_or("VC has no kid")?;
+        let issuer_did = vc_payload
+            .get("iss")
+            .and_then(Value::as_str)
+            .ok_or("VC has no iss")?
+            .to_string();
+        let vc_kid = vc_header
+            .get("kid")
+            .and_then(Value::as_str)
+            .ok_or("VC has no kid")?;
 
         // Each credential may (in general) come from a different issuer -
         // resolve per credential rather than assuming they share the
@@ -489,8 +563,14 @@ async fn mock_verify_dcp_bearer_token(token: &str, state: &MockGatedProviderStat
         }
 
         let vc_body = vc_payload.get("vc").cloned().unwrap_or(Value::Null);
-        let types = vc_body.get("type").and_then(Value::as_array).cloned().unwrap_or_default();
-        let has_expected_type = types.iter().any(|t| t.as_str() == Some(EXPECTED_CREDENTIAL_TYPE));
+        let types = vc_body
+            .get("type")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let has_expected_type = types
+            .iter()
+            .any(|t| t.as_str() == Some(EXPECTED_CREDENTIAL_TYPE));
         if !has_expected_type {
             continue;
         }
@@ -532,7 +612,10 @@ struct GatedParticipant {
 async fn spawn_gated_participant() -> GatedParticipant {
     let (listener, addr) = bind_localhost().await;
     let host = format!("127.0.0.1:{}", addr.port());
-    let own_did = format!("did:web:{}:{MOCK_PROVIDER_DID_PATH_SEGMENT}", host.replace(':', "%3A"));
+    let own_did = format!(
+        "did:web:{}:{MOCK_PROVIDER_DID_PATH_SEGMENT}",
+        host.replace(':', "%3A")
+    );
 
     let state = Arc::new(MockGatedProviderState {
         key_pair: DcpKeyPair::generate(own_did.clone()),
@@ -591,10 +674,14 @@ async fn spawn_holder(credential_jws_for: impl FnOnce(&str) -> String) -> Holder
     holder.credential_jws = credential_jws_for(&holder_did);
 
     let holder = Arc::new(holder);
-    let state = AppState::new(Arc::new(InMemoryCatalogCache::new())).with_holder(Some(holder.clone()));
+    let state =
+        AppState::new(Arc::new(InMemoryCatalogCache::new())).with_holder(Some(holder.clone()));
     let server = spawn(listener, build_router(state));
 
-    HolderRig { holder, _server: server }
+    HolderRig {
+        holder,
+        _server: server,
+    }
 }
 
 /// Spin up a minimal, standalone `did:web` identity for a credential
@@ -632,7 +719,12 @@ async fn spawn_issuer() -> (DcpKeyPair, JoinHandle<()>) {
 /// `vc.credentialSubject.catalogAccess` = the granted dataset ids, `exp` =
 /// the given expiry (a past timestamp produces a deliberately expired
 /// credential).
-fn issue_credential(issuer_key: &DcpKeyPair, holder_did: &str, catalog_access: &[&str], exp: u64) -> String {
+fn issue_credential(
+    issuer_key: &DcpKeyPair,
+    holder_did: &str,
+    catalog_access: &[&str],
+    exp: u64,
+) -> String {
     let payload = json!({
         "iss": issuer_key.own_did,
         "sub": holder_did,
@@ -652,7 +744,9 @@ fn issue_credential(issuer_key: &DcpKeyPair, holder_did: &str, catalog_access: &
 
 #[tokio::test]
 async fn crawl_once_pulls_open_and_dcp_gated_catalogs_with_real_per_caller_filtering() {
-    let _ = tracing_subscriber::fmt().with_env_filter("warn,ds_catalog_broker_rs=debug,dcp_core=debug").try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("warn,ds_catalog_broker_rs=debug,dcp_core=debug")
+        .try_init();
     let open = spawn_open_participant().await;
     let gated = spawn_gated_participant().await;
 
@@ -668,22 +762,50 @@ async fn crawl_once_pulls_open_and_dcp_gated_catalogs_with_real_per_caller_filte
     let http = reqwest::Client::new();
     let cache = InMemoryCatalogCache::new();
 
-    let summary = crawl_once(&http, &participants, Some(holder_rig.holder.as_ref()), &cache).await;
+    let summary = crawl_once(
+        &http,
+        &participants,
+        Some(holder_rig.holder.as_ref()),
+        &cache,
+    )
+    .await;
 
     assert_eq!(summary.attempted, 2, "attempted: {summary:?}");
-    assert_eq!(summary.failed, 0, "failed (failures: {:?}): {summary:?}", summary.failures);
+    assert_eq!(
+        summary.failed, 0,
+        "failed (failures: {:?}): {summary:?}",
+        summary.failures
+    );
     assert_eq!(summary.succeeded, 2, "succeeded: {summary:?}");
 
-    let open_catalogs = cache.query(CatalogQuery::for_node(NodeId::new("open-participant"))).await.unwrap();
+    let open_catalogs = cache
+        .query(CatalogQuery::for_node(NodeId::new("open-participant")))
+        .await
+        .unwrap();
     assert_eq!(open_catalogs.len(), 1);
-    let mut open_ids: Vec<&str> = open_catalogs[0].datasets.iter().map(|d| d.id.as_str()).collect();
+    let mut open_ids: Vec<&str> = open_catalogs[0]
+        .datasets
+        .iter()
+        .map(|d| d.id.as_str())
+        .collect();
     open_ids.sort_unstable();
     assert_eq!(open_ids, vec!["OPEN-01", "OPEN-02"]);
 
-    let gated_catalogs = cache.query(CatalogQuery::for_node(NodeId::new("gated-participant"))).await.unwrap();
+    let gated_catalogs = cache
+        .query(CatalogQuery::for_node(NodeId::new("gated-participant")))
+        .await
+        .unwrap();
     assert_eq!(gated_catalogs.len(), 1);
-    let gated_ids: Vec<&str> = gated_catalogs[0].datasets.iter().map(|d| d.id.as_str()).collect();
-    assert_eq!(gated_ids, vec!["GATED-01"], "GATED-02 was never granted by the credential and must not be visible");
+    let gated_ids: Vec<&str> = gated_catalogs[0]
+        .datasets
+        .iter()
+        .map(|d| d.id.as_str())
+        .collect();
+    assert_eq!(
+        gated_ids,
+        vec!["GATED-01"],
+        "GATED-02 was never granted by the credential and must not be visible"
+    );
 }
 
 // --- Negative path: an expired credential must not be treated as a ----
@@ -708,14 +830,20 @@ async fn crawl_once_pulls_open_and_dcp_gated_catalogs_with_real_per_caller_filte
 /// exercises the same real signal the original did, independent of
 /// `ds_catalog_broker_rs`.
 #[tokio::test]
-async fn crawl_once_records_a_failure_for_an_expired_dcp_credential_and_preserves_prior_cache_data() {
+async fn crawl_once_records_a_failure_for_an_expired_dcp_credential_and_preserves_prior_cache_data()
+{
     let gated = spawn_gated_participant().await;
 
     let (issuer_key, _issuer_server) = spawn_issuer().await;
     let holder_rig = spawn_holder(move |holder_did| {
         // exp in the past: this credential is already expired the moment
         // it's presented.
-        issue_credential(&issuer_key, holder_did, &["GATED-01"], now_secs().saturating_sub(3600))
+        issue_credential(
+            &issuer_key,
+            holder_did,
+            &["GATED-01"],
+            now_secs().saturating_sub(3600),
+        )
     })
     .await;
 
@@ -729,7 +857,13 @@ async fn crawl_once_records_a_failure_for_an_expired_dcp_credential_and_preserve
     prior_good.datasets.push(dataset("GATED-01"));
     cache.upsert(prior_good.clone()).await.unwrap();
 
-    let summary = crawl_once(&http, &participants, Some(holder_rig.holder.as_ref()), &cache).await;
+    let summary = crawl_once(
+        &http,
+        &participants,
+        Some(holder_rig.holder.as_ref()),
+        &cache,
+    )
+    .await;
 
     assert_eq!(summary.attempted, 1, "attempted: {summary:?}");
     assert_eq!(
@@ -738,8 +872,15 @@ async fn crawl_once_records_a_failure_for_an_expired_dcp_credential_and_preserve
     );
     assert_eq!(summary.succeeded, 0, "succeeded: {summary:?}");
 
-    let stored = cache.query(CatalogQuery::for_node(NodeId::new("gated-participant"))).await.unwrap();
-    assert_eq!(stored.len(), 1, "prior cached catalog for this node must still be present");
+    let stored = cache
+        .query(CatalogQuery::for_node(NodeId::new("gated-participant")))
+        .await
+        .unwrap();
+    assert_eq!(
+        stored.len(),
+        1,
+        "prior cached catalog for this node must still be present"
+    );
     assert_eq!(
         stored[0], prior_good,
         "a failed crawl must not overwrite the previously cached good catalog for this node"

@@ -1,0 +1,73 @@
+name: CI
+
+# Quality gates + testing for this product's own crates. Three independent
+# jobs (not one sequential pipeline) so each shows as its own required
+# check in a PR: fmt and clippy are fast-fail static gates, test is the
+# real correctness gate.
+#
+# All three target the 5 product crates explicitly (PRODUCT_CRATES) rather
+# than `--workspace`: the vendored submodules under vendor/ (contreforts-kg,
+# contreforts-core, contreforts-core/declaration, contreforts-config) are
+# real workspace members so this repo's root Cargo.toml can pin their
+# shared dependency versions/feature defaults (see that file's own
+# comment), but they are not this product's own code, and `--workspace`
+# would also directly select them as top-level build targets - which (for
+# contreforts-kg specifically) activates its *own* default features
+# (including oxigraph's RocksDB backend, a from-source C++/cmake build -
+# real CI time for a persistence capability this product never uses, per
+# crates/rdf-store/Cargo.toml's comment on that same dependency edge, and
+# PR #4). Building only PRODUCT_CRATES keeps the actual product build's
+# dependency graph exactly what `cargo tree -e features -p
+# ds-catalog-broker-rs` shows a real deployment build would use, and
+# avoids gating this product's CI on a vendored dependency's own
+# formatting/lint choices.
+#
+# All jobs still need the vendored submodules checked out - cargo can't
+# resolve the workspace's shared dependency versions without their
+# manifests present, even when not directly building them.
+
+on:
+  push:
+    branches: [ds-catalog-broker-rs]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  PRODUCT_CRATES: -p catalog-core -p rdf-store -p ds-catalog-broker-rs -p dcp-core -p crawler
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt ${{ env.PRODUCT_CRATES }} -- --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy ${{ env.PRODUCT_CRATES }} --all-targets --all-features -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test ${{ env.PRODUCT_CRATES }}

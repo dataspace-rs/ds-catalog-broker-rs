@@ -34,11 +34,16 @@ pub const PRESENTATION_QUERY_CONTEXT: &str = "https://w3id.org/dspace-dcp/v1.0/d
 pub const EXPECTED_CREDENTIAL_TYPE: &str = "FederatedCatalogAccessCredential";
 
 pub fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).expect("system clock before epoch").as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before epoch")
+        .as_secs()
 }
 
 pub fn b64_decode(segment: &str) -> Result<Vec<u8>, String> {
-    URL_SAFE_NO_PAD.decode(segment).map_err(|e| format!("invalid base64url: {e}"))
+    URL_SAFE_NO_PAD
+        .decode(segment)
+        .map_err(|e| format!("invalid base64url: {e}"))
 }
 
 pub fn b64_encode(bytes: impl AsRef<[u8]>) -> String {
@@ -57,8 +62,10 @@ pub fn decode_jws_unverified(token: &str) -> Result<(String, Value, Value), Stri
         return Err("JWS has more than 3 segments".to_string());
     }
     let signing_input = format!("{header_b64}.{payload_b64}");
-    let header: Value = serde_json::from_slice(&b64_decode(header_b64)?).map_err(|e| e.to_string())?;
-    let payload: Value = serde_json::from_slice(&b64_decode(payload_b64)?).map_err(|e| e.to_string())?;
+    let header: Value =
+        serde_json::from_slice(&b64_decode(header_b64)?).map_err(|e| e.to_string())?;
+    let payload: Value =
+        serde_json::from_slice(&b64_decode(payload_b64)?).map_err(|e| e.to_string())?;
     Ok((signing_input, header, payload))
 }
 
@@ -69,7 +76,8 @@ pub fn verify_jws_signature(token: &str, verifying_key: &VerifyingKey) -> Result
     let sig_b64 = parts.next().ok_or("missing JWS signature")?;
     let signing_input = format!("{header_b64}.{payload_b64}");
     let sig_bytes = b64_decode(sig_b64)?;
-    let signature = Signature::from_slice(&sig_bytes).map_err(|e| format!("malformed signature: {e}"))?;
+    let signature =
+        Signature::from_slice(&sig_bytes).map_err(|e| format!("malformed signature: {e}"))?;
     verifying_key
         .verify(signing_input.as_bytes(), &signature)
         .map_err(|e| format!("signature verification failed: {e}"))
@@ -98,7 +106,10 @@ pub fn did_web_to_url(did: &str, insecure_http: bool) -> Result<String, String> 
     if path_segments.is_empty() {
         Ok(format!("{scheme}://{host}/.well-known/did.json"))
     } else {
-        Ok(format!("{scheme}://{host}/{}/did.json", path_segments.join("/")))
+        Ok(format!(
+            "{scheme}://{host}/{}/did.json",
+            path_segments.join("/")
+        ))
     }
 }
 
@@ -140,7 +151,11 @@ pub struct DidService {
     pub service_endpoint: String,
 }
 
-pub async fn resolve_did(client: &reqwest::Client, did: &str, insecure_http: bool) -> Result<DidDocument, String> {
+pub async fn resolve_did(
+    client: &reqwest::Client,
+    did: &str,
+    insecure_http: bool,
+) -> Result<DidDocument, String> {
     let url = did_web_to_url(did, insecure_http)?;
     let response = client
         .get(&url)
@@ -148,7 +163,10 @@ pub async fn resolve_did(client: &reqwest::Client, did: &str, insecure_http: boo
         .await
         .map_err(|e| format!("failed to resolve DID {did} at {url}: {e}"))?;
     if !response.status().is_success() {
-        return Err(format!("DID resolution for {did} returned HTTP {}", response.status()));
+        return Err(format!(
+            "DID resolution for {did} returned HTTP {}",
+            response.status()
+        ));
     }
     response
         .json::<DidDocument>()
@@ -175,13 +193,19 @@ pub fn jwk_to_verifying_key(jwk: &Jwk) -> Result<VerifyingKey, String> {
     if x.len() != 32 || y.len() != 32 {
         return Err("EC JWK x/y must be 32 bytes for P-256".to_string());
     }
+    // p256 0.13's own generic-array 0.14 re-export deprecates `from_slice`/
+    // `as_slice` in favor of a generic-array 1.x API p256 0.13 doesn't
+    // itself use yet - tracked as a pending upstream dependency bump, not
+    // fixable from this crate alone without pulling p256 forward.
+    #[allow(deprecated)]
     let point = p256::EncodedPoint::from_affine_coordinates(
         p256::FieldBytes::from_slice(&x),
         p256::FieldBytes::from_slice(&y),
         false,
     );
     let public_key = p256::PublicKey::from_encoded_point(&point);
-    let public_key = Option::<p256::PublicKey>::from(public_key).ok_or("invalid EC point in JWK")?;
+    let public_key =
+        Option::<p256::PublicKey>::from(public_key).ok_or("invalid EC point in JWK")?;
     Ok(VerifyingKey::from(public_key))
 }
 
@@ -246,8 +270,22 @@ impl DcpKeyPair {
         let signing_key = SigningKey::random(&mut rand::rngs::OsRng);
         let verifying_key = VerifyingKey::from(&signing_key);
         let point = verifying_key.to_encoded_point(false);
-        let x: [u8; 32] = point.x().expect("uncompressed point has x").as_slice().try_into().expect("32 bytes");
-        let y: [u8; 32] = point.y().expect("uncompressed point has y").as_slice().try_into().expect("32 bytes");
+        // See jwk_to_verifying_key's own #[allow(deprecated)] comment: same
+        // pending generic-array 1.x upgrade, not fixable here alone.
+        #[allow(deprecated)]
+        let x: [u8; 32] = point
+            .x()
+            .expect("uncompressed point has x")
+            .as_slice()
+            .try_into()
+            .expect("32 bytes");
+        #[allow(deprecated)]
+        let y: [u8; 32] = point
+            .y()
+            .expect("uncompressed point has y")
+            .as_slice()
+            .try_into()
+            .expect("32 bytes");
         Self {
             own_key_id: format!("{own_did}#dsp-key"),
             own_did,
@@ -257,7 +295,8 @@ impl DcpKeyPair {
     }
 
     pub fn signing_key(&self) -> SigningKey {
-        SigningKey::from_bytes((&self.signing_key_bytes).into()).expect("stored key bytes are always valid")
+        SigningKey::from_bytes((&self.signing_key_bytes).into())
+            .expect("stored key bytes are always valid")
     }
 
     /// This party's own DID document. `services` lets a holder advertise
@@ -347,7 +386,12 @@ impl HolderIdentity {
     /// the actual route `ds_catalog_broker_rs::build_router` registers - and a new
     /// signing key is generated (see this type's doc comment for why that
     /// key is never persisted).
-    pub fn new(own_did_host: String, insecure_http: bool, credential_jws: String, required_scope: String) -> Self {
+    pub fn new(
+        own_did_host: String,
+        insecure_http: bool,
+        credential_jws: String,
+        required_scope: String,
+    ) -> Self {
         let own_did = format!("did:web:{}:dsp:holder", own_did_host.replace(':', "%3A"));
         Self {
             key_pair: DcpKeyPair::generate(own_did),
@@ -376,7 +420,8 @@ impl HolderIdentity {
     pub fn own_did_document(&self) -> Value {
         let scheme = if self.insecure_http { "http" } else { "https" };
         let endpoint = format!("{scheme}://{}/dsp/holder", self.own_did_host);
-        self.key_pair.did_document(&[("CredentialService".to_string(), endpoint)])
+        self.key_pair
+            .did_document(&[("CredentialService".to_string(), endpoint)])
     }
 
     /// Builds T1, the self-issued token this holder presents as
@@ -409,7 +454,11 @@ impl HolderIdentity {
             "exp": now + 300,
             "jti": uuid::Uuid::new_v4().to_string(),
         });
-        let access_token = sign_jws(&access_token_payload, &signing_key, &self.key_pair.own_key_id);
+        let access_token = sign_jws(
+            &access_token_payload,
+            &signing_key,
+            &self.key_pair.own_key_id,
+        );
 
         // T1.
         let t1_payload = json!({
@@ -442,15 +491,22 @@ impl HolderIdentity {
     /// VP is signed with this holder's `own_key_id`, resolvable via this
     /// holder's own DID document (the same one `own_did_document` serves)
     /// - exactly the key `verify_dcp_bearer_token` looks up before
-    /// verifying the VP's signature.
+    ///   verifying the VP's signature.
     pub async fn answer_presentation_query(
         &self,
         incoming_bearer_token: &str,
         http: &reqwest::Client,
     ) -> Result<PresentationResponseMessage, String> {
         let (_, header, payload) = decode_jws_unverified(incoming_bearer_token)?;
-        let caller_did = payload.get("iss").and_then(Value::as_str).ok_or("token has no iss")?.to_string();
-        let kid = header.get("kid").and_then(Value::as_str).ok_or("token has no kid")?;
+        let caller_did = payload
+            .get("iss")
+            .and_then(Value::as_str)
+            .ok_or("token has no iss")?
+            .to_string();
+        let kid = header
+            .get("kid")
+            .and_then(Value::as_str)
+            .ok_or("token has no kid")?;
 
         let caller_doc = resolve_did(http, &caller_did, self.insecure_http).await?;
         let caller_key = find_verifying_key(&caller_doc, kid)?;
@@ -482,9 +538,15 @@ impl HolderIdentity {
             "exp": now + 300,
             "jti": uuid::Uuid::new_v4().to_string(),
         });
-        let vp_jws = sign_jws(&vp_payload, &self.key_pair.signing_key(), &self.key_pair.own_key_id);
+        let vp_jws = sign_jws(
+            &vp_payload,
+            &self.key_pair.signing_key(),
+            &self.key_pair.own_key_id,
+        );
 
-        Ok(PresentationResponseMessage { presentation: vec![vp_jws] })
+        Ok(PresentationResponseMessage {
+            presentation: vec![vp_jws],
+        })
     }
 }
 
@@ -507,7 +569,10 @@ mod tests {
         assert_eq!(payload["iss"], json!(holder.key_pair.own_did));
         assert_eq!(payload["sub"], json!(holder.key_pair.own_did));
         assert_eq!(payload["aud"], json!(target_provider_did));
-        assert!(payload["token"].is_string(), "T1 must carry a nested `token` claim");
+        assert!(
+            payload["token"].is_string(),
+            "T1 must carry a nested `token` claim"
+        );
         assert!(payload["exp"].as_u64().unwrap() > now_secs());
 
         let kid = header["kid"].as_str().expect("kid header");
@@ -522,14 +587,20 @@ mod tests {
         // The nested token (T2) is itself a well-formed, self-signed JWS
         // scoped to the holder's own DID.
         let nested = payload["token"].as_str().unwrap();
-        let (_, _nested_header, nested_payload) = decode_jws_unverified(nested).expect("valid nested JWS");
+        let (_, _nested_header, nested_payload) =
+            decode_jws_unverified(nested).expect("valid nested JWS");
         assert_eq!(nested_payload["aud"], json!(holder.key_pair.own_did));
         verify_jws_signature(nested, &verifying_key).expect("T2 signature must verify");
     }
 
     #[test]
     fn own_did_document_advertises_a_credential_service() {
-        let holder = HolderIdentity::new("localhost:19100".to_string(), true, "fake.jws".to_string(), "scope".to_string());
+        let holder = HolderIdentity::new(
+            "localhost:19100".to_string(),
+            true,
+            "fake.jws".to_string(),
+            "scope".to_string(),
+        );
         let doc = holder.own_did_document();
         let services = doc["service"].as_array().expect("service array");
         assert_eq!(services.len(), 1);
