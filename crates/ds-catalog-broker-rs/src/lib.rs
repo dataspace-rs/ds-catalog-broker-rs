@@ -392,6 +392,14 @@ struct CatalogRequestOffer {
 /// ODRL policy model yet (`docs/gap-analysis-2026-08-27.md` §3.4, an
 /// already-documented, still-open gap this route does not attempt to
 /// paper over with invented policy content).
+///
+/// `title`/`description`/`version`/`creator`/`thumbnail`/`keywords` are the
+/// optional descriptive fields sourced from `catalog_core::Dataset.properties`
+/// (see `dataset_to_offer`) - each is omitted from the wire, not emitted
+/// `null`/empty, when the source data doesn't have it, matching the real
+/// struct's own `#[serde(default)]` on every one of these fields (so a
+/// caller reading with that struct sees exactly `None`/`vec![]`, not a
+/// spurious explicit null).
 #[derive(Debug, Serialize)]
 struct CatalogRequestDataset {
     #[serde(rename = "@id")]
@@ -403,6 +411,36 @@ struct CatalogRequestDataset {
     name: String,
     #[serde(rename = "contenttype")]
     content_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    creator: Option<CatalogRequestCreator>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thumbnail: Option<CatalogRequestThumbnail>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    keywords: Vec<String>,
+}
+
+/// Matches `models::Creator` - both fields are required on the real struct
+/// (no `#[serde(default)]` on either), so a `CatalogRequestCreator` is only
+/// ever constructed with both filled in. See `dataset_to_offer`'s doc
+/// comment for how `thumbnail` gets filled when the source data has no
+/// creator-specific one of its own.
+#[derive(Debug, Serialize)]
+struct CatalogRequestCreator {
+    name: String,
+    thumbnail: CatalogRequestThumbnail,
+}
+
+/// Matches `models::Thumbnail` - its one field, `resource`, is required
+/// there (no `#[serde(default)]`).
+#[derive(Debug, Serialize)]
+struct CatalogRequestThumbnail {
+    resource: String,
 }
 
 /// Matches `models::Service` - all four fields required (`endpoint_description`
@@ -446,6 +484,11 @@ struct CatalogRequestParticipantId {
 ///   "name" or "content type" field, so `name` is `dataset.id` (the best
 ///   available stand-in) and `contenttype` is the first distribution's
 ///   format string, or an empty string when the dataset has none.
+/// - dataset `title`/`description`/`version`/`creator`/`thumbnail`/
+///   `keywords`: read back out of `dataset.properties` under the same keys
+///   `crawler::collect_datasets_and_services` writes them under - see
+///   `dataset_to_offer`'s own doc comment for the exact mapping, including
+///   how `creator`/`keywords` are built up from flatter string properties.
 fn catalog_to_offer(catalog: &Catalog) -> Option<CatalogRequestOffer> {
     let data_service = catalog.data_services.first()?;
     let participant_id = catalog
@@ -473,7 +516,51 @@ fn catalog_to_offer(catalog: &Catalog) -> Option<CatalogRequestOffer> {
     })
 }
 
+/// Reads the optional descriptive properties `crawler::collect_datasets_and_services`
+/// wrote into `dataset.properties` (`title`, `description`, `version`,
+/// `creatorName`, `thumbnail`, `keywords`) back out and populates the
+/// matching wire fields. Every one of them stays properly absent
+/// (`None`/`vec![]`) when the source data doesn't have it - nothing here
+/// invents a placeholder.
+///
+/// - `creator`: built only when a `creatorName` property is present. A
+///   `Creator` requires both a `name` and a `thumbnail`
+///   (`edc_federated_catalog_client::models::dataset::Creator`), but
+///   `catalog_core::Dataset.properties` carries only one dataset-level
+///   `thumbnail`, not a separate creator-specific one - so the creator's
+///   `thumbnail` reuses the dataset's own `thumbnail` property value
+///   (empty string when that's also absent, since `Creator::thumbnail` is
+///   itself required and there is nothing else to put there). A defensible
+///   simplification: real crawled data rarely distinguishes a dataset's
+///   thumbnail from its creator's.
+/// - `keywords`: the single comma-separated `keywords` property, split on
+///   `,` with each entry trimmed; absent or empty -> an empty `Vec`,
+///   matching the real struct's own `#[serde(default)]` on that field.
 fn dataset_to_offer(dataset: &Dataset) -> CatalogRequestDataset {
+    let thumbnail_value = dataset.properties.get("thumbnail").cloned();
+    let creator =
+        dataset
+            .properties
+            .get("creatorName")
+            .cloned()
+            .map(|name| CatalogRequestCreator {
+                name,
+                thumbnail: CatalogRequestThumbnail {
+                    resource: thumbnail_value.clone().unwrap_or_default(),
+                },
+            });
+    let keywords = dataset
+        .properties
+        .get("keywords")
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
     CatalogRequestDataset {
         id: dataset.id.clone(),
         r#type: "Dataset".to_string(),
@@ -484,6 +571,12 @@ fn dataset_to_offer(dataset: &Dataset) -> CatalogRequestDataset {
             .first()
             .map(|d| d.format.clone())
             .unwrap_or_default(),
+        title: dataset.properties.get("title").cloned(),
+        description: dataset.properties.get("description").cloned(),
+        version: dataset.properties.get("version").cloned(),
+        creator,
+        thumbnail: thumbnail_value.map(|resource| CatalogRequestThumbnail { resource }),
+        keywords,
     }
 }
 
@@ -1603,9 +1696,10 @@ mod tests {
             "thumbnail".to_string(),
             "https://example.org/thumbnails/soil-moisture.png".to_string(),
         );
-        dataset
-            .properties
-            .insert("keywords".to_string(), "soil, moisture ,sensors".to_string());
+        dataset.properties.insert(
+            "keywords".to_string(),
+            "soil, moisture ,sensors".to_string(),
+        );
         state.cache.upsert(catalog).await.unwrap();
 
         let app = build_router(state);
@@ -1632,8 +1726,7 @@ mod tests {
             .expect("creator must be present when creatorName is set");
         assert_eq!(creator.name, "Acme Sensors Inc.");
         assert_eq!(
-            creator.thumbnail.resource,
-            "https://example.org/thumbnails/soil-moisture.png",
+            creator.thumbnail.resource, "https://example.org/thumbnails/soil-moisture.png",
             "creator has no dedicated thumbnail property in the bag, so it reuses the \
              dataset's own thumbnail"
         );

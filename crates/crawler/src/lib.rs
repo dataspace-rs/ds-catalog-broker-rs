@@ -221,6 +221,14 @@ async fn crawl_one(
 /// A response missing `dataset` and/or `service` entirely is not an error
 /// - it produces a `Catalog` with empty `datasets`/`data_services`.
 ///
+/// A dataset object's optional descriptive keys - `title`, `description`,
+/// `version`, `creatorName` (a flat string; the real target wire shape's
+/// nested `creator.name` isn't accepted here, since `catalog_core::Dataset`
+/// has no nested creator concept), `thumbnail`, and `keywords` (kept as one
+/// comma-separated string, unsplit) - are folded verbatim into the parsed
+/// `Dataset.properties` bag under those exact keys when present, and simply
+/// left absent from it when not. See `collect_datasets_and_services`.
+///
 /// Also tolerates a "federation of federations" response - one where the
 /// crawled participant is itself a multi-participant aggregator (e.g.
 /// another instance of this workspace's own `ds-catalog-broker-rs`, once it has 2+
@@ -288,6 +296,29 @@ fn collect_datasets_and_services(value: &Value, catalog: &mut Catalog) {
                 properties: Default::default(),
                 distributions: Vec::new(),
             };
+
+            // Optional descriptive fields, folded verbatim into the
+            // properties bag under these exact keys when present in the
+            // source JSON - absent entirely when the key is missing, never
+            // defaulted. `keywords` is a single comma-separated string on
+            // the wire (e.g. "soil,moisture,sensors") and is kept that way
+            // here too: splitting it is `ds-catalog-broker-rs::dataset_to_offer`'s
+            // job, not this crawler's (see that function's own doc
+            // comment).
+            for key in [
+                "title",
+                "description",
+                "version",
+                "creatorName",
+                "thumbnail",
+                "keywords",
+            ] {
+                if let Some(value) = dataset_value.get(key).and_then(Value::as_str) {
+                    dataset
+                        .properties
+                        .insert(key.to_string(), value.to_string());
+                }
+            }
 
             if let Some(distributions) = dataset_value.get("distribution").and_then(Value::as_array)
             {
