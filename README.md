@@ -83,6 +83,16 @@ request, because there is no such request in DSP.
   `rdf_store::oxigraph_backend::OxigraphCatalogCache::sparql_query_json`'s
   doc comment for the full contract.
 
+Both surfaces can be gated behind a real **OAuth2 Bearer** resource-server
+check (a JWT access token, verified against a configured JWKS) — opt-in
+via `OAUTH2_JWKS_URI`, off (unauthenticated, unchanged) by default. This
+is deliberately *not* a revival of the removed `DspAuthMode` gating system
+above, nor DCP (which stays scoped to the crawler's own holder role, see
+below) — a standard OAuth2 resource-server check for a machine-to-machine
+API, independent of either. See
+[`docs/oauth2-bearer-gating-2026-08-28.md`](docs/oauth2-bearer-gating-2026-08-28.md)
+for the full design and wire shapes.
+
 **It deliberately does not implement a DSP catalog-serving endpoint at
 all.** Answering `CatalogRequestMessage` — including presenting *this*
 participant's own catalog to other participants — is the job of that

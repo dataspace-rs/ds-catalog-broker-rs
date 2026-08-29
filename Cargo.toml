@@ -68,6 +68,16 @@ base64 = "0.22"
 # (ParticipantsConfig). Not used anywhere else in this workspace's own
 # crates today.
 toml = "0.8"
+# A real, spec-tested JWT library for the OAuth2 Bearer resource-server
+# check (docs/oauth2-bearer-gating-2026-08-28.md), gating GET /catalog and
+# GET/POST /sparql. Deliberately not the same choice as p256/rand above:
+# those hand-roll a single, self-issued ES256 token type this project
+# fully controls the shape of (dcp-core); here the token comes from an
+# arbitrary external authorization server whose signing algorithm and
+# claim shape aren't controlled by this project, which is exactly the case
+# a maintained JWT library is for - see ds-catalog-broker-rs's oauth2.rs
+# module doc.
+jsonwebtoken = "9"
 # default-features = false is load-bearing: contreforts-config's own
 # manifest does `oxigraph = { workspace = true }` unmodified (it has no
 # feature-switch of its own, unlike contreforts-kg after
