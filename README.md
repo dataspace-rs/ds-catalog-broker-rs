@@ -65,7 +65,7 @@ So `crawl_once` issues one separate `POST .../catalog/request` per
 configured participant — never a combined "give me everyone's catalog"
 request, because there is no such request in DSP.
 
-**This product's only two serving surfaces are non-DSP:**
+**This product's only three serving surfaces are non-DSP:**
 
 - A **dataset list per participant**: `GET /catalog?node_id=`, an
   internal Management-API-style endpoint. The gap analysis (§3.1)
@@ -82,14 +82,28 @@ request, because there is no such request in DSP.
   running the Oxigraph-backed cache. See the gap analysis §3.3 and
   `rdf_store::oxigraph_backend::OxigraphCatalogCache::sparql_query_json`'s
   doc comment for the full contract.
+- A **federated-catalog management API**, `POST /api/management/v4/catalogs/request`
+  — the exact wire shape real EDC Federated Catalog UI tooling
+  (`edc-federated-catalog-client`'s `list_offers`/`get_offer_by_dataset_id`)
+  already expects: a `QuerySpec`-shaped request body (optionally filtering
+  on `datasets.id`), a `Vec<FederatedCatalogOffer>` response in the real
+  DCAT/ODRL JSON-LD shape that crate deserializes, one offer per cached
+  catalog. `hasPolicy` is always present but empty per dataset (still the
+  same open ODRL gap, §3.4 below) — everything else (`title`,
+  `description`, `version`, `creator`, `thumbnail`, `keywords`) is
+  genuinely populated when a crawled dataset carries that data in its own
+  `properties` bag. This is what lets an existing, unmodified
+  federated-catalog UI component point at this broker instead of a full
+  EDC connector's Management API for the catalog view specifically.
 
-Both surfaces can be gated behind a real **OAuth2 Bearer** resource-server
-check (a JWT access token, verified against a configured JWKS) — opt-in
-via `OAUTH2_JWKS_URI`, off (unauthenticated, unchanged) by default. This
-is deliberately *not* a revival of the removed `DspAuthMode` gating system
-above, nor DCP (which stays scoped to the crawler's own holder role, see
-below) — a standard OAuth2 resource-server check for a machine-to-machine
-API, independent of either. See
+All three surfaces can be gated behind a real **OAuth2 Bearer**
+resource-server check (a JWT access token, verified against a configured
+JWKS) — opt-in via `OAUTH2_JWKS_URI`, off (unauthenticated, unchanged) by
+default. This is deliberately *not* a revival of the removed
+`DspAuthMode` gating system above, nor DCP (which stays scoped to the
+crawler's own holder role, see below) — a standard OAuth2
+resource-server check for a machine-to-machine API, independent of
+either. See
 [`docs/oauth2-bearer-gating-2026-08-28.md`](docs/oauth2-bearer-gating-2026-08-28.md)
 for the full design and wire shapes.
 
@@ -155,8 +169,10 @@ top), but as separate Rust crates rather than Java SPI modules:
 - `ds-catalog-broker-rs` — this product's own HTTP surface (crate/binary
   name; `crates/http-api` until this project's rebrand): `GET /catalog`
   (dataset list per participant), `GET`/`POST /sparql` (the SPARQL
-  endpoint), and the DCP holder routes. The DSP catalog-serving endpoint
-  that used to live here has been removed per the gap analysis §1.
+  endpoint), `POST /api/management/v4/catalogs/request` (the
+  federated-catalog management API), and the DCP holder routes. The DSP
+  catalog-serving endpoint that used to live here has been removed per
+  the gap analysis §1.
 
 ![Outbound credential presentation when crawling a gated participant: crawl_one reads each participant's configured credential protocol - a fixed placeholder header when none is required, a directly-attached self-issued DCP token, or an OID4VP vp_token/presentation_submission exchange that returns a short-lived access token - all converging on the same Authorization: Bearer header attached to the same catalog request](docs/diagrams/harvester-credential-protocols.svg)
 
