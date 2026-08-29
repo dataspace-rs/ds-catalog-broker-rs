@@ -134,22 +134,31 @@ top), but as separate Rust crates rather than Java SPI modules:
 - `rdf-store` — the semantic cache: a storage-agnostic `CatalogCache`
   trait, an in-memory implementation, and an Oxigraph-backed
   implementation. See ["The RDF backend"](#the-rdf-backend-semantic-cache).
-- `dcp-core` — shared Decentralized Claims Protocol (DCP) primitives (JWS
-  sign/verify, `did:web` resolution) used by both identity roles this
-  product can play: a verifier (today, only to gate the DSP endpoint
-  being removed — see the gap analysis) and a **holder** — `crawler`
-  presenting *this* participant's own credential when a remote Catalog
-  Service it's crawling requires one, a legitimate Consumer-side concern
-  this product keeps.
+- `dcp-core` — shared Decentralized Claims Protocol (DCP) JWS sign/verify
+  and `did:web` resolution primitives, used by `crawler`'s **holder**
+  role: presenting *this* participant's own credential when a remote
+  Catalog Service it's crawling requires one, a legitimate Consumer-side
+  concern this product keeps (the DCP *verifier* role that used to live
+  here gated the now-removed DSP-serving endpoint and was removed with
+  it — see the gap analysis §1.2).
 - `crawler` — the crawl engine: a local-config participant registry, a
-  scheduled crawl loop (`spawn_scheduler`/`crawl_once`), and a lenient
-  DSP-response parser tolerant of real Eclipse EDC's JSON-LD shape, not
-  just this project's own.
+  scheduled crawl loop (`spawn_scheduler`/`crawl_once`), a lenient
+  DSP-response parser tolerant of real Eclipse EDC's JSON-LD shape (not
+  just this project's own), and, per participant, a choice of credential
+  protocol to present when one is required: **DCP** (above) or
+  **OID4VP** (OpenID for Verifiable Presentations) — a single-shot
+  `vp_token`/`presentation_submission` exchange reusing `dcp-core`'s same
+  JWS/`did:web` primitives rather than a second crypto stack. See
+  [`docs/oid4vp-holder-2026-08-28.md`](docs/oid4vp-holder-2026-08-28.md)
+  for why OID4VP exists alongside DCP here, what's simplified in this
+  first pass, and the exact wire shapes.
 - `ds-catalog-broker-rs` — this product's own HTTP surface (crate/binary
   name; `crates/http-api` until this project's rebrand): `GET /catalog`
   (dataset list per participant), `GET`/`POST /sparql` (the SPARQL
   endpoint), and the DCP holder routes. The DSP catalog-serving endpoint
   that used to live here has been removed per the gap analysis §1.
+
+![Outbound credential presentation when crawling a gated participant: crawl_one reads each participant's configured credential protocol - a fixed placeholder header when none is required, a directly-attached self-issued DCP token, or an OID4VP vp_token/presentation_submission exchange that returns a short-lived access token - all converging on the same Authorization: Bearer header attached to the same catalog request](docs/diagrams/harvester-credential-protocols.svg)
 
 ## Relationship to the `dataspace` study repo
 
