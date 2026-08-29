@@ -215,10 +215,18 @@ role).
 `contreforts-config`) are vendored as git submodules under `vendor/` and
 are real members of this workspace - not a separate, excluded one - so
 this repo's own root `Cargo.toml` decides their shared dependency
-versions and feature defaults (including Oxigraph's `rocksdb` feature).
-See [`vendor/README.md`](vendor/README.md) for what's vendored, why, and
-a known metadata caveat (inherited `license`/`edition` on those crates
-doesn't match their own upstream `Cargo.toml`).
+versions and feature defaults. See [`vendor/README.md`](vendor/README.md)
+for what's vendored, why, and a known metadata caveat (inherited
+`license`/`edition` on those crates doesn't match their own upstream
+`Cargo.toml`).
+
+**No RocksDB.** Oxigraph's own default build pulls in `oxrocksdb-sys` (a
+from-source C++/cmake build) for on-disk persistence this product never
+uses (see "The RDF backend" above: in-memory only, by design). It cost
+real build time for nothing - `crates/rdf-store/Cargo.toml`'s own comment
+on its `contreforts-kg` dependency line has the full story of where that
+dependency was actually coming from and how it was removed, entirely
+without shipping a persistence feature this product doesn't need.
 
 ## Compliance and benchmarks (historical — being re-scoped)
 
@@ -271,9 +279,19 @@ compliance/
 ## Building and testing
 
 ```bash
-cargo build --workspace
-cargo test --workspace
+cargo build -p catalog-core -p rdf-store -p ds-catalog-broker-rs -p dcp-core -p crawler
+cargo test  -p catalog-core -p rdf-store -p ds-catalog-broker-rs -p dcp-core -p crawler
 ```
+
+Not `--workspace`: `vendor/contreforts-kg` is a real workspace member
+(see "Vendored dependencies" above), and `--workspace` selects it
+directly too - which activates its *own* default `rocksdb` feature (a
+real capability that crate's own test suite genuinely needs, not a bug
+on its part) regardless of what this product's own crates request on
+their dependency edge to it. Scoping to these five crates - exactly
+what `.github/workflows/ci.yml`'s `PRODUCT_CRATES` also builds - is what
+keeps a real build of this product itself free of that dependency; see
+the RocksDB note above.
 
 ## License
 
