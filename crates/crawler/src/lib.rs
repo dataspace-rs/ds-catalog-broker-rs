@@ -221,6 +221,14 @@ async fn crawl_one(
 /// A response missing `dataset` and/or `service` entirely is not an error
 /// - it produces a `Catalog` with empty `datasets`/`data_services`.
 ///
+/// A dataset object's optional descriptive keys - `title`, `description`,
+/// `version`, `creatorName` (a flat string; the real target wire shape's
+/// nested `creator.name` isn't accepted here, since `catalog_core::Dataset`
+/// has no nested creator concept), `thumbnail`, and `keywords` (kept as one
+/// comma-separated string, unsplit) - are folded verbatim into the parsed
+/// `Dataset.properties` bag under those exact keys when present, and simply
+/// left absent from it when not. See `collect_datasets_and_services`.
+///
 /// Also tolerates a "federation of federations" response - one where the
 /// crawled participant is itself a multi-participant aggregator (e.g.
 /// another instance of this workspace's own `ds-catalog-broker-rs`, once it has 2+
@@ -288,6 +296,29 @@ fn collect_datasets_and_services(value: &Value, catalog: &mut Catalog) {
                 properties: Default::default(),
                 distributions: Vec::new(),
             };
+
+            // Optional descriptive fields, folded verbatim into the
+            // properties bag under these exact keys when present in the
+            // source JSON - absent entirely when the key is missing, never
+            // defaulted. `keywords` is a single comma-separated string on
+            // the wire (e.g. "soil,moisture,sensors") and is kept that way
+            // here too: splitting it is `ds-catalog-broker-rs::dataset_to_offer`'s
+            // job, not this crawler's (see that function's own doc
+            // comment).
+            for key in [
+                "title",
+                "description",
+                "version",
+                "creatorName",
+                "thumbnail",
+                "keywords",
+            ] {
+                if let Some(value) = dataset_value.get(key).and_then(Value::as_str) {
+                    dataset
+                        .properties
+                        .insert(key.to_string(), value.to_string());
+                }
+            }
 
             if let Some(distributions) = dataset_value.get("distribution").and_then(Value::as_array)
             {
@@ -620,6 +651,93 @@ mod tests {
             service_ids,
             vec!["node-a-data-service", "node-b-data-service"]
         );
+    }
+
+    /// A dataset JSON object carrying every optional descriptive key this
+    /// crawler is expected to fold into `Dataset.properties`
+    /// (`title`/`description`/`version`/`creatorName`/`thumbnail`/
+    /// `keywords`) round-trips into that bag verbatim, under exactly those
+    /// keys - `keywords` stays a single comma-separated string, unsplit
+    /// (splitting is `ds-catalog-broker-rs::dataset_to_offer`'s job, not the
+    /// crawler's).
+    #[test]
+    fn dataset_optional_descriptive_properties_round_trip_into_properties_bag() {
+        let body = json!({
+            "@id": "cat-1",
+            "dataset": [{
+                "@id": "DATASET-A",
+                "title": "Soil Moisture Readings",
+                "description": "Hourly soil moisture readings from field sensors.",
+                "version": "1.2.0",
+                "creatorName": "Acme Sensors Inc.",
+                "thumbnail": "https://example.org/thumbnails/soil-moisture.png",
+                "keywords": "soil,moisture,sensors",
+                "distribution": [{"format": "application/json", "accessService": "svc-1"}]
+            }],
+            "service": [{"@id": "svc-1", "endpointURL": "https://example.org/dsp"}]
+        });
+        let participant = participant("descriptive-participant");
+        let catalog = parse_catalog_response(&body, &participant);
+
+        assert_eq!(catalog.datasets.len(), 1);
+        let props = &catalog.datasets[0].properties;
+        assert_eq!(
+            props.get("title").map(String::as_str),
+            Some("Soil Moisture Readings")
+        );
+        assert_eq!(
+            props.get("description").map(String::as_str),
+            Some("Hourly soil moisture readings from field sensors.")
+        );
+        assert_eq!(props.get("version").map(String::as_str), Some("1.2.0"));
+        assert_eq!(
+            props.get("creatorName").map(String::as_str),
+            Some("Acme Sensors Inc.")
+        );
+        assert_eq!(
+            props.get("thumbnail").map(String::as_str),
+            Some("https://example.org/thumbnails/soil-moisture.png")
+        );
+        assert_eq!(
+            props.get("keywords").map(String::as_str),
+            Some("soil,moisture,sensors"),
+            "keywords must be stored verbatim as one comma-separated string, not pre-split"
+        );
+    }
+
+    /// The backward-compatible half of the property above: a dataset JSON
+    /// object with none of the optional descriptive keys must still parse
+    /// exactly as before, with every one of those `properties` entries
+    /// simply absent (never a fabricated default).
+    #[test]
+    fn dataset_without_optional_descriptive_properties_leaves_them_absent_from_the_bag() {
+        let body = json!({
+            "@id": "cat-1",
+            "dataset": [{
+                "@id": "DATASET-A",
+                "distribution": [{"format": "application/json", "accessService": "svc-1"}]
+            }],
+            "service": [{"@id": "svc-1", "endpointURL": "https://example.org/dsp"}]
+        });
+        let participant = participant("no-descriptive-participant");
+        let catalog = parse_catalog_response(&body, &participant);
+
+        assert_eq!(catalog.datasets.len(), 1);
+        let props = &catalog.datasets[0].properties;
+        for key in [
+            "title",
+            "description",
+            "version",
+            "creatorName",
+            "thumbnail",
+            "keywords",
+        ] {
+            assert!(
+                !props.contains_key(key),
+                "expected no '{key}' property, found {:?}",
+                props.get(key)
+            );
+        }
     }
 
     #[tokio::test]

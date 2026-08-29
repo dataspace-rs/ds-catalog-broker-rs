@@ -154,6 +154,15 @@ pub fn build_router(state: AppState) -> Router {
         // `sparql_route`'s own doc comment for the exact request/response
         // shape supported.
         .route("/sparql", get(sparql_route_get).post(sparql_route_post))
+        // This product's own federated catalog Management API surface,
+        // wire-compatible with the real, already-published
+        // `edc-federated-catalog-client` crate - see
+        // `catalog_request_route`'s doc comment for the exact request/
+        // response shape.
+        .route(
+            "/api/management/v4/catalogs/request",
+            post(catalog_request_route),
+        )
         // This connector's own DCP *holder* identity (see `AppState::holder`'s
         // doc comment) - this participant's own credential-presentation
         // capability for crawling a DCP-gated remote participant. Both
@@ -328,6 +337,353 @@ async fn get_catalog(
         )
             .into_response(),
     }
+}
+
+// --- `POST /api/management/v4/catalogs/request` -------------------------
+//
+// This product's own federated catalog Management API surface. Its wire
+// format is not this project's to invent: it must match what the real,
+// already-published `edc-federated-catalog-client` crate
+// (https://github.com/dataspace-rs/edc-federated-catalog-client, pinned at
+// 0.2.5 as a *dev*-dependency below - see this crate's own Cargo.toml for
+// why not a normal one) actually sends and parses -
+// `FederatedCatalogClient::list_offers`/`get_offer_by_dataset_id` both
+// `POST {endpoint}/api/management/v4/catalogs/request` with a
+// `QuerySpec`-shaped body and expect a `Vec<FederatedCatalogOffer>` back
+// (see that crate's `src/lib.rs`). The response types just below
+// (`CatalogRequestOffer` and friends) are hand-written, field-for-field,
+// against that crate's `src/models/federated_catalog_offer.rs`,
+// `dataset.rs`, `service.rs`, and `participant_id.rs` - not derived from
+// them, since production code here doesn't depend on that crate at all
+// (only this file's own tests do) - but proven wire-identical by those
+// same tests, which deserialize a real response body from this route with
+// the real client crate's own `FederatedCatalogOffer` type.
+
+/// One offer, matching `edc-federated-catalog-client`'s
+/// `models::FederatedCatalogOffer` exactly: `@id`/`@type` JSON-LD framing,
+/// a `dcat:dataset` array (omitted, not emitted empty, when there are no
+/// datasets - the real struct defaults it on deserialize either way), a
+/// single required `dcat:service` (see `catalog_to_offer`'s doc comment
+/// for why a catalog with no data services can't produce one of these at
+/// all), a required `participantId` object, and a required `originator`
+/// string.
+#[derive(Debug, Serialize)]
+struct CatalogRequestOffer {
+    #[serde(rename = "@id")]
+    id: String,
+    #[serde(rename = "@type")]
+    r#type: String,
+    #[serde(
+        rename = "http://www.w3.org/ns/dcat#dataset",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    dataset: Vec<CatalogRequestDataset>,
+    #[serde(rename = "http://www.w3.org/ns/dcat#service")]
+    service: CatalogRequestService,
+    #[serde(rename = "participantId")]
+    participant_id: CatalogRequestParticipantId,
+    originator: String,
+}
+
+/// Matches `models::Dataset`. `has_policy` is always present as an empty
+/// array, never omitted: the real struct has no `#[serde(default)]` on
+/// that field, so it's required on the wire, and an empty array is the
+/// only honest content for it today - `catalog-core::Dataset` has no real
+/// ODRL policy model yet (`docs/gap-analysis-2026-08-27.md` §3.4, an
+/// already-documented, still-open gap this route does not attempt to
+/// paper over with invented policy content).
+///
+/// `title`/`description`/`version`/`creator`/`thumbnail`/`keywords` are the
+/// optional descriptive fields sourced from `catalog_core::Dataset.properties`
+/// (see `dataset_to_offer`) - each is omitted from the wire, not emitted
+/// `null`/empty, when the source data doesn't have it, matching the real
+/// struct's own `#[serde(default)]` on every one of these fields (so a
+/// caller reading with that struct sees exactly `None`/`vec![]`, not a
+/// spurious explicit null).
+#[derive(Debug, Serialize)]
+struct CatalogRequestDataset {
+    #[serde(rename = "@id")]
+    id: String,
+    #[serde(rename = "@type")]
+    r#type: String,
+    #[serde(rename = "http://www.w3.org/ns/odrl/2/hasPolicy")]
+    has_policy: Vec<serde_json::Value>,
+    name: String,
+    #[serde(rename = "contenttype")]
+    content_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    creator: Option<CatalogRequestCreator>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thumbnail: Option<CatalogRequestThumbnail>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    keywords: Vec<String>,
+}
+
+/// Matches `models::Creator` - both fields are required on the real struct
+/// (no `#[serde(default)]` on either), so a `CatalogRequestCreator` is only
+/// ever constructed with both filled in. See `dataset_to_offer`'s doc
+/// comment for how `thumbnail` gets filled when the source data has no
+/// creator-specific one of its own.
+#[derive(Debug, Serialize)]
+struct CatalogRequestCreator {
+    name: String,
+    thumbnail: CatalogRequestThumbnail,
+}
+
+/// Matches `models::Thumbnail` - its one field, `resource`, is required
+/// there (no `#[serde(default)]`).
+#[derive(Debug, Serialize)]
+struct CatalogRequestThumbnail {
+    resource: String,
+}
+
+/// Matches `models::Service` - all four fields required (`endpoint_description`
+/// is a plain `String` there, not `Option<String>` like
+/// `catalog_core::DataService::endpoint_description`, hence the
+/// `unwrap_or_default` in `catalog_to_offer`).
+#[derive(Debug, Serialize)]
+struct CatalogRequestService {
+    #[serde(rename = "@id")]
+    id: String,
+    #[serde(rename = "@type")]
+    r#type: String,
+    #[serde(rename = "http://www.w3.org/ns/dcat#endpointDescription")]
+    endpoint_description: String,
+    #[serde(rename = "http://www.w3.org/ns/dcat#endpointURL")]
+    endpoint_url: String,
+}
+
+/// Matches `models::ParticipantId`.
+#[derive(Debug, Serialize)]
+struct CatalogRequestParticipantId {
+    #[serde(rename = "@id")]
+    id: String,
+}
+
+/// Converts one cached `catalog_core::Catalog` into the wire shape above -
+/// `None` when `catalog.data_services` is empty. A `FederatedCatalogOffer`'s
+/// `service` field is a single required `Service`, not `Option`/`Vec`, so
+/// a catalog with zero data services simply cannot produce a valid offer;
+/// `catalog_request_route` skips these and logs how many, rather than
+/// fabricating a placeholder service. When one or more data services do
+/// exist, the first (`data_services[0]`) is used.
+///
+/// Field mapping notes (everything not explicitly called out is a direct
+/// copy):
+/// - `participantId`/`originator`: `catalog.participant_id` when the crawl
+///   recorded one (a DID, typically), else `catalog.origin_node`'s id - the
+///   best identifier this product actually has for who this catalog came
+///   from.
+/// - dataset `name`/`contenttype`: `catalog_core::Dataset` has no separate
+///   "name" or "content type" field, so `name` is `dataset.id` (the best
+///   available stand-in) and `contenttype` is the first distribution's
+///   format string, or an empty string when the dataset has none.
+/// - dataset `title`/`description`/`version`/`creator`/`thumbnail`/
+///   `keywords`: read back out of `dataset.properties` under the same keys
+///   `crawler::collect_datasets_and_services` writes them under - see
+///   `dataset_to_offer`'s own doc comment for the exact mapping, including
+///   how `creator`/`keywords` are built up from flatter string properties.
+fn catalog_to_offer(catalog: &Catalog) -> Option<CatalogRequestOffer> {
+    let data_service = catalog.data_services.first()?;
+    let participant_id = catalog
+        .participant_id
+        .clone()
+        .unwrap_or_else(|| catalog.origin_node.0.clone());
+
+    Some(CatalogRequestOffer {
+        id: catalog.id.clone(),
+        r#type: "Catalog".to_string(),
+        dataset: catalog.datasets.iter().map(dataset_to_offer).collect(),
+        service: CatalogRequestService {
+            id: data_service.id.clone(),
+            r#type: "DataService".to_string(),
+            endpoint_description: data_service
+                .endpoint_description
+                .clone()
+                .unwrap_or_default(),
+            endpoint_url: data_service.endpoint_url.clone(),
+        },
+        participant_id: CatalogRequestParticipantId {
+            id: participant_id.clone(),
+        },
+        originator: participant_id,
+    })
+}
+
+/// Reads the optional descriptive properties `crawler::collect_datasets_and_services`
+/// wrote into `dataset.properties` (`title`, `description`, `version`,
+/// `creatorName`, `thumbnail`, `keywords`) back out and populates the
+/// matching wire fields. Every one of them stays properly absent
+/// (`None`/`vec![]`) when the source data doesn't have it - nothing here
+/// invents a placeholder.
+///
+/// - `creator`: built only when a `creatorName` property is present. A
+///   `Creator` requires both a `name` and a `thumbnail`
+///   (`edc_federated_catalog_client::models::dataset::Creator`), but
+///   `catalog_core::Dataset.properties` carries only one dataset-level
+///   `thumbnail`, not a separate creator-specific one - so the creator's
+///   `thumbnail` reuses the dataset's own `thumbnail` property value
+///   (empty string when that's also absent, since `Creator::thumbnail` is
+///   itself required and there is nothing else to put there). A defensible
+///   simplification: real crawled data rarely distinguishes a dataset's
+///   thumbnail from its creator's.
+/// - `keywords`: the single comma-separated `keywords` property, split on
+///   `,` with each entry trimmed; absent or empty -> an empty `Vec`,
+///   matching the real struct's own `#[serde(default)]` on that field.
+fn dataset_to_offer(dataset: &Dataset) -> CatalogRequestDataset {
+    let thumbnail_value = dataset.properties.get("thumbnail").cloned();
+    let creator =
+        dataset
+            .properties
+            .get("creatorName")
+            .cloned()
+            .map(|name| CatalogRequestCreator {
+                name,
+                thumbnail: CatalogRequestThumbnail {
+                    resource: thumbnail_value.clone().unwrap_or_default(),
+                },
+            });
+    let keywords = dataset
+        .properties
+        .get("keywords")
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    CatalogRequestDataset {
+        id: dataset.id.clone(),
+        r#type: "Dataset".to_string(),
+        has_policy: Vec::new(),
+        name: dataset.id.clone(),
+        content_type: dataset
+            .distributions
+            .first()
+            .map(|d| d.format.clone())
+            .unwrap_or_default(),
+        title: dataset.properties.get("title").cloned(),
+        description: dataset.properties.get("description").cloned(),
+        version: dataset.properties.get("version").cloned(),
+        creator,
+        thumbnail: thumbnail_value.map(|resource| CatalogRequestThumbnail { resource }),
+        keywords,
+    }
+}
+
+/// The `QuerySpec`-shaped request body `POST /api/management/v4/catalogs/request`
+/// accepts, matching the real client's `ListOfferBody`
+/// (`edc-federated-catalog-client::ListOfferBody`) closely enough to parse
+/// what it sends - `@context`/`@type` are accepted but ignored (this route
+/// has nothing to validate them against), and only `filterExpression` is
+/// acted on. Deserialized leniently: a missing, empty, or entirely
+/// malformed body all fall back to `Default` (no filter) rather than a 400
+/// - see `catalog_request_route`'s doc comment for why.
+#[derive(Debug, Deserialize, Default)]
+struct CatalogRequestBody {
+    #[serde(rename = "filterExpression", default)]
+    filter_expression: Vec<CatalogRequestConstraint>,
+}
+
+/// One `filterExpression` entry, matching the real client's private
+/// `Constraint` shape (`{operandLeft, operator, operandRight}`) closely
+/// enough to read it back - this route only ever recognizes one exact
+/// shape of it, see `catalog_request_route`.
+#[derive(Debug, Deserialize, Default)]
+struct CatalogRequestConstraint {
+    #[serde(rename = "operandLeft", default)]
+    operand_left: String,
+    #[serde(default)]
+    operator: String,
+    #[serde(rename = "operandRight", default)]
+    operand_right: String,
+}
+
+/// `POST /api/management/v4/catalogs/request` - see this section's module-
+/// level comment above for the wire-compatibility contract this route
+/// exists to satisfy.
+///
+/// Response: one offer per catalog currently in `state.cache`
+/// (`state.cache.query(CatalogQuery::all())`, the same call `GET /catalog`
+/// already uses), built by `catalog_to_offer` - catalogs with no data
+/// services are skipped (logged once as a `tracing::warn!` with the
+/// skipped count, not per-catalog) rather than erroring or fabricating a
+/// service.
+///
+/// Request body: a `QuerySpec`-shaped JSON body (`CatalogRequestBody`) that
+/// may carry a `filterExpression` array. The only constraint shape honored
+/// is `operandLeft == "datasets.id"` with `operator == "="` - the exact
+/// filter `get_offer_by_dataset_id` sends client-side - which narrows the
+/// response to offers containing a dataset with that id. Any other/
+/// unrecognized constraint, and a missing, empty, or malformed body
+/// entirely, all mean the same thing: the full unfiltered offer list comes
+/// back. A real client always sends *some* `QuerySpec` body, so being
+/// lenient here matters more than being strict.
+///
+/// Gated by the same OAuth2 Bearer mechanism as `GET /catalog` and
+/// `GET`/`POST /sparql` (`check_oauth2_bearer`) - this is another
+/// catalog-listing surface, so gating it the same way is the consistent
+/// choice. Unchanged/open when `state.oauth2` is `None`, exactly like
+/// those two routes.
+async fn catalog_request_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    if let Err(response) = check_oauth2_bearer(&state, &headers) {
+        return *response;
+    }
+
+    let catalogs = match state.cache.query(CatalogQuery::all()).await {
+        Ok(catalogs) => catalogs,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: err.to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let mut skipped = 0usize;
+    let mut offers: Vec<CatalogRequestOffer> = Vec::with_capacity(catalogs.len());
+    for catalog in &catalogs {
+        match catalog_to_offer(catalog) {
+            Some(offer) => offers.push(offer),
+            None => skipped += 1,
+        }
+    }
+    if skipped > 0 {
+        tracing::warn!(
+            skipped,
+            "skipped {skipped} catalog(s) with no data services in POST \
+             /api/management/v4/catalogs/request: a FederatedCatalogOffer's 'service' field is \
+             a single required Service, not Option/Vec, so a catalog with zero data services \
+             cannot produce a valid offer"
+        );
+    }
+
+    let filter = serde_json::from_slice::<CatalogRequestBody>(&body).unwrap_or_default();
+    let dataset_id_filter = filter.filter_expression.iter().find_map(|constraint| {
+        (constraint.operand_left == "datasets.id" && constraint.operator == "=")
+            .then(|| constraint.operand_right.clone())
+    });
+    if let Some(dataset_id) = dataset_id_filter {
+        offers.retain(|offer| offer.dataset.iter().any(|dataset| dataset.id == dataset_id));
+    }
+
+    Json(offers).into_response()
 }
 
 /// `application/sparql-results+json`, the one result media type this
@@ -1226,5 +1582,349 @@ mod tests {
                 .unwrap()
                 .contains("DATASET-A")
         );
+    }
+
+    // --- `POST /api/management/v4/catalogs/request` -----------------------
+    //
+    // Wire-compatibility with the real, already-published
+    // `edc-federated-catalog-client` 0.2.5 crate (a *dev*-dependency only -
+    // see this crate's own Cargo.toml) is the whole point of this route,
+    // so these tests deserialize its real response bodies with that
+    // crate's own `FederatedCatalogOffer` type rather than a local
+    // stand-in - a genuine round-trip proof, not just "200 and looks like
+    // JSON".
+
+    use edc_federated_catalog_client::ListOfferBody;
+    use edc_federated_catalog_client::models::FederatedCatalogOffer;
+
+    fn catalog_request(body: Body) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/api/management/v4/catalogs/request")
+            .header("Content-Type", "application/json")
+            .body(body)
+            .unwrap()
+    }
+
+    /// The strongest proof this route needs: a real `Vec<catalog_core::Catalog>`
+    /// fixture, seeded into a real cache, queried through the real router
+    /// via `oneshot` with the real client's own `ListOfferBody::default()`
+    /// as the request body, and the raw response bytes literally
+    /// deserialized with `Vec<edc_federated_catalog_client::models::FederatedCatalogOffer>` -
+    /// asserting on the parsed Rust struct's fields, which only compiles
+    /// and passes if the wire format genuinely matches field for field.
+    #[tokio::test]
+    async fn catalog_request_route_response_deserializes_with_the_real_client_offer_type() {
+        let state = test_state();
+        state
+            .cache
+            .upsert(participant_catalog("node-a", "cat-a", "DATASET-A"))
+            .await
+            .unwrap();
+
+        let app = build_router(state);
+        let request_body = serde_json::to_vec(&ListOfferBody::default()).unwrap();
+        let response = app
+            .oneshot(catalog_request(Body::from(request_body)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let offers: Vec<FederatedCatalogOffer> = serde_json::from_slice(&body).expect(
+            "response body must deserialize with the real edc-federated-catalog-client crate's \
+             own FederatedCatalogOffer type",
+        );
+
+        assert_eq!(offers.len(), 1);
+        let offer = &offers[0];
+        assert_eq!(offer.id, "cat-a");
+        assert_eq!(offer.r#type, "Catalog");
+        assert_eq!(offer.participant_id.id, "did:example:node-a");
+        assert_eq!(offer.originator, "did:example:node-a");
+        assert_eq!(offer.service.endpoint_url, "https://node-a.example.org/dsp");
+        assert_eq!(
+            offer.service.endpoint_description,
+            "dataspace-protocol-http:1.0"
+        );
+        assert_eq!(offer.dataset.len(), 1);
+        let dataset = &offer.dataset[0];
+        assert_eq!(dataset.id, "DATASET-A");
+        assert_eq!(dataset.r#type, "Dataset");
+        assert_eq!(dataset.name, "DATASET-A");
+        assert_eq!(dataset.content_type, "application/json");
+        assert!(
+            dataset.has_policy.is_empty(),
+            "hasPolicy must be present but empty - catalog-core has no real ODRL policy model \
+             yet (gap analysis §3.4)"
+        );
+        assert_eq!(dataset.title, None);
+        assert_eq!(dataset.description, None);
+        assert_eq!(dataset.version, None);
+        assert_eq!(dataset.creator, None);
+        assert_eq!(dataset.thumbnail, None);
+        assert!(dataset.keywords.is_empty());
+    }
+
+    /// The other half of the fixture above: every optional descriptive
+    /// `catalog_core::Dataset.properties` entry
+    /// (`title`/`description`/`version`/`creatorName`/`thumbnail`/
+    /// `keywords`) populated, proving the whole chain - properties bag ->
+    /// `dataset_to_offer` -> this route's JSON response -> the real
+    /// `edc-federated-catalog-client` crate's own deserialization - actually
+    /// carries them through, not just that it compiles.
+    #[tokio::test]
+    async fn catalog_request_route_response_carries_optional_dataset_descriptors_through_to_the_real_client_type()
+     {
+        let state = test_state();
+        let mut catalog = participant_catalog("node-a", "cat-a", "DATASET-A");
+        let dataset = &mut catalog.datasets[0];
+        dataset
+            .properties
+            .insert("title".to_string(), "Soil Moisture Readings".to_string());
+        dataset.properties.insert(
+            "description".to_string(),
+            "Hourly soil moisture readings from field sensors.".to_string(),
+        );
+        dataset
+            .properties
+            .insert("version".to_string(), "1.2.0".to_string());
+        dataset
+            .properties
+            .insert("creatorName".to_string(), "Acme Sensors Inc.".to_string());
+        dataset.properties.insert(
+            "thumbnail".to_string(),
+            "https://example.org/thumbnails/soil-moisture.png".to_string(),
+        );
+        dataset.properties.insert(
+            "keywords".to_string(),
+            "soil, moisture ,sensors".to_string(),
+        );
+        state.cache.upsert(catalog).await.unwrap();
+
+        let app = build_router(state);
+        let response = app.oneshot(catalog_request(Body::empty())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let offers: Vec<FederatedCatalogOffer> = serde_json::from_slice(&body).expect(
+            "response body must deserialize with the real edc-federated-catalog-client crate's \
+             own FederatedCatalogOffer type",
+        );
+        assert_eq!(offers.len(), 1);
+        let dataset = &offers[0].dataset[0];
+
+        assert_eq!(dataset.title.as_deref(), Some("Soil Moisture Readings"));
+        assert_eq!(
+            dataset.description.as_deref(),
+            Some("Hourly soil moisture readings from field sensors.")
+        );
+        assert_eq!(dataset.version.as_deref(), Some("1.2.0"));
+        let creator = dataset
+            .creator
+            .as_ref()
+            .expect("creator must be present when creatorName is set");
+        assert_eq!(creator.name, "Acme Sensors Inc.");
+        assert_eq!(
+            creator.thumbnail.resource, "https://example.org/thumbnails/soil-moisture.png",
+            "creator has no dedicated thumbnail property in the bag, so it reuses the \
+             dataset's own thumbnail"
+        );
+        assert_eq!(
+            dataset
+                .thumbnail
+                .as_ref()
+                .expect("thumbnail must be present")
+                .resource,
+            "https://example.org/thumbnails/soil-moisture.png"
+        );
+        assert_eq!(
+            dataset.keywords,
+            vec![
+                "soil".to_string(),
+                "moisture".to_string(),
+                "sensors".to_string()
+            ],
+            "keywords must be split on ',' and each entry trimmed"
+        );
+    }
+
+    /// The `datasets.id`/`=` `filterExpression` constraint - the exact
+    /// shape `FederatedCatalogClient::get_offer_by_dataset_id` sends
+    /// client-side - narrows the response down to only offers containing a
+    /// dataset with that id.
+    #[tokio::test]
+    async fn catalog_request_route_filters_by_the_datasets_id_constraint() {
+        let state = test_state();
+        state
+            .cache
+            .upsert(participant_catalog("node-a", "cat-a", "DATASET-A"))
+            .await
+            .unwrap();
+        state
+            .cache
+            .upsert(participant_catalog("node-b", "cat-b", "DATASET-B"))
+            .await
+            .unwrap();
+
+        let app = build_router(state);
+        let request_body = serde_json::json!({
+            "@context": {"@vocab": "https://w3id.org/edc/v0.0.1/ns/"},
+            "@type": "QuerySpec",
+            "filterExpression": [
+                {"operandLeft": "datasets.id", "operator": "=", "operandRight": "DATASET-B"}
+            ],
+        });
+        let response = app
+            .oneshot(catalog_request(Body::from(
+                serde_json::to_vec(&request_body).unwrap(),
+            )))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let offers: Vec<FederatedCatalogOffer> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(offers.len(), 1);
+        assert_eq!(offers[0].id, "cat-b");
+        assert_eq!(offers[0].dataset[0].id, "DATASET-B");
+    }
+
+    /// An unrecognized/irrelevant constraint (anything other than
+    /// `datasets.id`/`=`) must not silently empty the result - the full,
+    /// unfiltered list comes back instead, per this route's documented
+    /// leniency.
+    #[tokio::test]
+    async fn catalog_request_route_ignores_an_unrecognized_constraint() {
+        let state = test_state();
+        state
+            .cache
+            .upsert(participant_catalog("node-a", "cat-a", "DATASET-A"))
+            .await
+            .unwrap();
+
+        let app = build_router(state);
+        let request_body = serde_json::json!({
+            "@type": "QuerySpec",
+            "filterExpression": [
+                {"operandLeft": "originator", "operator": "=", "operandRight": "someone-else"}
+            ],
+        });
+        let response = app
+            .oneshot(catalog_request(Body::from(
+                serde_json::to_vec(&request_body).unwrap(),
+            )))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let offers: Vec<FederatedCatalogOffer> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(offers.len(), 1);
+        assert_eq!(offers[0].id, "cat-a");
+    }
+
+    /// A missing/malformed body must not 400 - "be lenient rather than
+    /// fragile" (this route's own doc comment) - a real client always
+    /// sends *some* `QuerySpec` body, but this proves an empty or garbage
+    /// one still gets the full, unfiltered offer list back rather than an
+    /// error.
+    #[tokio::test]
+    async fn catalog_request_route_treats_a_missing_or_malformed_body_as_no_filter() {
+        let state = test_state();
+        state
+            .cache
+            .upsert(participant_catalog("node-a", "cat-a", "DATASET-A"))
+            .await
+            .unwrap();
+
+        for body in [Body::empty(), Body::from("not json at all")] {
+            let app = build_router(state.clone());
+            let response = app.oneshot(catalog_request(body)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let response_body = response.into_body().collect().await.unwrap().to_bytes();
+            let offers: Vec<FederatedCatalogOffer> =
+                serde_json::from_slice(&response_body).unwrap();
+            assert_eq!(offers.len(), 1);
+            assert_eq!(offers[0].id, "cat-a");
+        }
+    }
+
+    /// A catalog with zero data services cannot produce a valid offer (a
+    /// `FederatedCatalogOffer`'s `service` field is a single required
+    /// `Service`, not `Option`/`Vec`) - it must be skipped, not fabricated
+    /// or errored on, and it must not affect offers for catalogs that do
+    /// have a data service.
+    #[tokio::test]
+    async fn catalog_request_route_skips_a_catalog_with_no_data_services() {
+        let state = test_state();
+        let mut no_service_catalog = Catalog::new("cat-no-service", NodeId::new("node-c"));
+        no_service_catalog.datasets.push(Dataset {
+            id: "DATASET-C".to_string(),
+            properties: Default::default(),
+            distributions: vec![],
+        });
+        state.cache.upsert(no_service_catalog).await.unwrap();
+        state
+            .cache
+            .upsert(participant_catalog("node-a", "cat-a", "DATASET-A"))
+            .await
+            .unwrap();
+
+        let app = build_router(state);
+        let response = app.oneshot(catalog_request(Body::empty())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let offers: Vec<FederatedCatalogOffer> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            offers.len(),
+            1,
+            "the no-data-service catalog must be skipped, not turned into a broken offer"
+        );
+        assert_eq!(offers[0].id, "cat-a");
+    }
+
+    /// Same OAuth2 Bearer gate as `GET /catalog` and `GET`/`POST /sparql`
+    /// (`check_oauth2_bearer`) - no token, gating configured: `401` with
+    /// `WWW-Authenticate: Bearer`, same as those two routes.
+    #[tokio::test]
+    async fn catalog_request_route_401s_with_www_authenticate_when_no_token_is_given() {
+        let (state, _key) = oauth2_catalog_state(|_| {}).await;
+        let app = build_router(state);
+        let response = app.oneshot(catalog_request(Body::empty())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::WWW_AUTHENTICATE)
+                .unwrap(),
+            "Bearer"
+        );
+    }
+
+    /// A fully valid token clears the gate and the real body comes back,
+    /// still wire-compatible with the real client's `FederatedCatalogOffer`.
+    #[tokio::test]
+    async fn catalog_request_route_200s_with_the_real_body_for_a_fully_valid_token() {
+        let (state, key) = oauth2_catalog_state(|_| {}).await;
+        let app = build_router(state);
+        let token = sign_es256(&key, base_claims());
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/management/v4/catalogs/request")
+            .header("Authorization", bearer(&token))
+            .header("Content-Type", "application/json")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let offers: Vec<FederatedCatalogOffer> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(offers.len(), 1);
+        assert_eq!(offers[0].id, "sample-catalog");
     }
 }

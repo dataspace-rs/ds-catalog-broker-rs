@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 660" role="img"
-     aria-label="This product implements the Dataspace Protocol's own Catalog Broker role, running inside one participant's own connector alongside that connector's other components. A Catalog Broker is a Consumer with trusted access to 1..N upstream Catalog Services that advertises their respective catalogs as one - it issues one separate CatalogRequestMessage per remote Catalog Service, per the Dataspace Protocol's own Replication Protocol section, and never answers such requests itself. Answering incoming DSP CatalogRequestMessage is explicitly the job of the connector's other components, not this product. Harvested results land in an internal semantic (RDF) cache, served only through two non-DSP surfaces: a per-participant dataset list, and a SPARQL query endpoint over the whole store, both optionally gated behind an OAuth2 Bearer resource-server check. An optional DCP holder identity lets the crawler present this participant's own credential when a remote Catalog Service requires one.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 740" role="img"
+     aria-label="This product implements the Dataspace Protocol's own Catalog Broker role, running inside one participant's own connector alongside that connector's other components. A Catalog Broker is a Consumer with trusted access to 1..N upstream Catalog Services that advertises their respective catalogs as one - it issues one separate CatalogRequestMessage per remote Catalog Service, per the Dataspace Protocol's own Replication Protocol section, and never answers such requests itself. Answering incoming DSP CatalogRequestMessage is explicitly the job of the connector's other components, not this product. Harvested results land in an internal semantic (RDF) cache, served only through three non-DSP surfaces: a per-participant dataset list, a SPARQL query endpoint over the whole store, and a federated-catalog management API, all optionally gated behind an OAuth2 Bearer resource-server check. An optional DCP holder identity lets the crawler present this participant's own credential when a remote Catalog Service requires one.">
   <style>
     .bg { fill: #ffffff; }
     .participant { fill: #f8fafc; stroke: #334155; stroke-width: 1.5; }
@@ -52,13 +52,13 @@
     </marker>
   </defs>
 
-  <rect class="bg" x="0" y="0" width="1000" height="660" />
+  <rect class="bg" x="0" y="0" width="1000" height="740" />
 
   <text class="title" x="500" y="26" text-anchor="middle">Deployment: a DSP Catalog Broker running inside one participant's own connector</text>
   <text class="caption" x="500" y="44" text-anchor="middle">A Consumer with trusted access to 1..N Catalog Services, advertising them as one — the spec's own "Catalog Broker" role</text>
 
   <!-- Participant's own connector -->
-  <rect class="participant" x="40" y="70" width="420" height="490" rx="8" />
+  <rect class="participant" x="40" y="70" width="420" height="650" rx="8" />
   <text class="title" x="250" y="96" text-anchor="middle">This participant's connector</text>
 
   <!-- crawler box -->
@@ -75,28 +75,30 @@
   <text class="cachetext caption" x="250" y="290" text-anchor="middle">(see semantic-cache-architecture.svg for internals)</text>
   <text class="cachetext caption" x="250" y="306" text-anchor="middle">target: real triples, not the current JSON-blob bridge</text>
 
-  <!-- http-api box: only the two sanctioned serving surfaces -->
-  <rect class="box" x="64" y="344" width="372" height="128" rx="6" />
+  <!-- http-api box: the three sanctioned serving surfaces -->
+  <rect class="box" x="64" y="344" width="372" height="170" rx="6" />
   <text class="label" x="250" y="366" text-anchor="middle">http-api — this product's only serving surfaces</text>
-  <rect class="cache" x="84" y="378" width="332" height="40" rx="5" opacity="0.6" />
-  <text class="sublabel" x="250" y="402" text-anchor="middle">Dataset list per participant (non-DSP)</text>
-  <rect class="cache" x="84" y="424" width="332" height="40" rx="5" opacity="0.6" />
-  <text class="sublabel" x="250" y="448" text-anchor="middle">SPARQL query endpoint (non-DSP)</text>
+  <rect class="cache" x="84" y="378" width="332" height="36" rx="5" opacity="0.6" />
+  <text class="sublabel" x="250" y="400" text-anchor="middle">Dataset list per participant (non-DSP)</text>
+  <rect class="cache" x="84" y="420" width="332" height="36" rx="5" opacity="0.6" />
+  <text class="sublabel" x="250" y="442" text-anchor="middle">SPARQL query endpoint (non-DSP)</text>
+  <rect class="cache" x="84" y="462" width="332" height="36" rx="5" opacity="0.6" />
+  <text class="sublabel" x="250" y="484" text-anchor="middle">Federated-catalog management API (non-DSP)</text>
+
+  <!-- OAuth2 Bearer gate, opt-in, sits in front of all three serving surfaces -->
+  <rect class="gate" x="150" y="524" width="200" height="30" rx="15" />
+  <text class="gatetext label" x="250" y="544" text-anchor="middle" font-size="11.5">OAuth2 Bearer gate (opt-in)</text>
 
   <!-- What this product explicitly does NOT do -->
-  <rect class="other" x="64" y="488" width="372" height="58" rx="6" />
-  <text class="othertext label" x="250" y="508" text-anchor="middle">No DSP catalog-serving here</text>
-  <text class="othertext caption" x="250" y="526" text-anchor="middle">answering CatalogRequestMessage is out of scope for this product</text>
+  <rect class="other" x="64" y="566" width="372" height="58" rx="6" />
+  <text class="othertext label" x="250" y="586" text-anchor="middle">No DSP catalog-serving here</text>
+  <text class="othertext caption" x="250" y="604" text-anchor="middle">answering CatalogRequestMessage is out of scope for this product</text>
 
   <!-- Operator/internal consumer -->
-  <rect class="consumer" x="120" y="586" width="260" height="56" rx="6" />
-  <text class="label" x="250" y="608" text-anchor="middle">Operator / internal tooling</text>
-  <text class="caption" x="250" y="626" text-anchor="middle">list datasets, or run SPARQL, over the cache</text>
-  <path class="query" marker-end="url(#arrow-query)" d="M 250,586 L 250,472" />
-
-  <!-- OAuth2 Bearer gate, opt-in, sits in front of both serving surfaces -->
-  <rect class="gate" x="150" y="516" width="200" height="30" rx="15" />
-  <text class="gatetext label" x="250" y="536" text-anchor="middle" font-size="11.5">OAuth2 Bearer gate (opt-in)</text>
+  <rect class="consumer" x="120" y="644" width="260" height="56" rx="6" />
+  <text class="label" x="250" y="666" text-anchor="middle">Operator / internal tooling</text>
+  <text class="caption" x="250" y="684" text-anchor="middle">list datasets, run SPARQL, or call the management API</text>
+  <path class="query" marker-end="url(#arrow-query)" d="M 250,644 L 250,514" />
 
   <!-- Remote catalog services -->
   <rect class="remote" x="600" y="100" width="360" height="70" rx="6" />
