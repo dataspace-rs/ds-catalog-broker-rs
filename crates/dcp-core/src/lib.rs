@@ -328,7 +328,7 @@ impl DcpKeyPair {
 
 /// A DCP **holder** identity: a party that presents a credential of its
 /// own to remote relying parties (here, participants the crawler polls
-/// with `requires_dcp = true`) and answers their Presentation API
+/// with `credential_protocol = "dcp"`) and answers their Presentation API
 /// callback in turn.
 ///
 /// ## Why the signing key is generated fresh every process start
@@ -425,8 +425,8 @@ impl HolderIdentity {
     }
 
     /// Builds T1, the self-issued token this holder presents as
-    /// `Authorization: Bearer <T1>` when calling a `requires_dcp = true`
-    /// participant's DSP catalog endpoint, addressed to
+    /// `Authorization: Bearer <T1>` when calling a `credential_protocol =
+    /// "dcp"` participant's DSP catalog endpoint, addressed to
     /// `target_provider_did` (that participant's own DID, used as `aud`).
     ///
     /// Shaped to exactly what `ds_catalog_broker_rs::dcp::verify_dcp_bearer_token`

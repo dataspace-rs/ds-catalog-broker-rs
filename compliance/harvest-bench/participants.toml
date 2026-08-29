@@ -7,9 +7,9 @@
 # spike.CatalogFixtureExtension mechanism - see
 # ../crawler-edc-integration-test.md for that mechanism's own proof.
 #
-# `requires_dcp = false` for both, matching every prior benchmark's own
-# documented scope decision (real EDC-side DCP is out of scope - see
-# ../benchmark-dcp-2026-08-27.md).
+# `credential_protocol` omitted (defaults to "none") for both, matching
+# every prior benchmark's own documented scope decision (real EDC-side
+# DCP/OID4VP is out of scope - see ../benchmark-dcp-2026-08-27.md).
 #
 # `interval_secs = 5` - short and observable, matching the period this
 # benchmark also configures for EDC's own crawler
@@ -27,10 +27,8 @@ interval_secs = 5
 id = "harvest-d"
 name = "Harvest participant D (3 datasets)"
 catalog_request_url = "http://127.0.0.1:19221/api/dsp/2025-1/catalog/request"
-requires_dcp = false
 
 [[participants]]
 id = "harvest-e"
 name = "Harvest participant E (7 datasets)"
 catalog_request_url = "http://127.0.0.1:19321/api/dsp/2025-1/catalog/request"
-requires_dcp = false
