@@ -431,10 +431,16 @@ pub mod memory {
 ///   triple using that term, not a synthesized one); otherwise
 /// - `fcns:property/<percent-encoded key>` - the documented fallback.
 ///
-/// No crawler populates `properties` today (`crawler::parse_catalog_response`
-/// leaves it `Default::default()`), so this path is exercised only by
-/// direct `CatalogCache::upsert` callers and this module's own tests - but
-/// whatever ends up in that map, including any future policy-relevant
+/// `crawler::collect_datasets_and_services` now populates `Dataset.properties`
+/// with a real crawled dataset's optional descriptors (`title`,
+/// `description`, `version`, `creatorName`, `thumbnail`, `keywords`, each
+/// only when the source DSP JSON actually carries it - see that function's
+/// own doc comment) - `POST /api/management/v4/catalogs/request` reads
+/// them straight back out through this exact mechanism to populate the
+/// real `edc_federated_catalog_client::models::Dataset`'s own optional
+/// fields. None of those keys are absolute IRIs, so all of them take the
+/// `fcns:property/<key>` fallback path above, not the passthrough one -
+/// but whatever ends up in that map, including any future policy-relevant
 /// data, is faithfully represented as a triple, never silently dropped.
 ///
 /// **Known limitation, not exercised by any current producer**: a
@@ -445,6 +451,23 @@ pub mod memory {
 /// `fcns:sequenceIndex`) would collide with this mapping's own structural
 /// triples. Flagged rather than defended against, since nothing produces
 /// such a key today.
+///
+/// **Test-coverage gap, not a functional one**: this crate's own tests
+/// prove the generic-properties round trip through a real
+/// `OxigraphCatalogCache` (write, then read back) with synthetic keys
+/// (e.g. `assetType`), and `ds_catalog_broker_rs`'s own tests prove
+/// `title`/`description`/etc. flow correctly from `Dataset.properties`
+/// into a real client-deserialized response - but against an
+/// `InMemoryCatalogCache`, bypassing this store entirely (see that
+/// crate's own `catalog_request_route_response_carries_optional_dataset_descriptors_through_to_the_real_client_type`
+/// test). No single automated test currently exercises the full chain -
+/// crawler parses a real DSP dataset's `title`/`description`/etc, upserts
+/// through *this* store, queries it back out - end to end. The live demo
+/// stack (`ds-labs-org/ds-dev-deployment`) does exercise exactly that
+/// chain, confirmed manually (real `title`/`description`/`thumbnail`/
+/// `keywords` observed in the served response), but that is not a
+/// repeatable, CI-enforced proof. Worth closing with a real test, not
+/// silently assumed to be covered because the pieces on either side are.
 ///
 /// ### Ordering (`fcns:sequenceIndex`)
 ///

@@ -223,7 +223,23 @@ the exact mapping (gap analysis §3.2). No ODRL `Offer`/`Policy` triples
 are emitted yet, since `catalog-core::Dataset` has no such field to
 derive them from (gap analysis §3.4, still open).
 
-![Internal architecture of the semantic cache: crawler parses a crawled catalog into a domain value, upserts it through the CatalogCache trait, OxigraphCatalogCache stores one named graph per origin node, and the two serving surfaces read from it - today limited by the JSON-blob-per-graph gap](docs/diagrams/semantic-cache-architecture.svg)
+`catalog-core::Dataset` also carries a generic `properties: BTreeMap<String, String>`
+bag, and `OxigraphCatalogCache` round-trips it transparently — one
+`fcns:property/<key>` triple per entry on write, decoded back into the
+same map on read — with no schema change needed for a new field.
+`crawler::collect_datasets_and_services` uses exactly this to carry each
+crawled dataset's `title`/`description`/`version`/`creatorName`/
+`thumbnail`/`keywords` (when the source DSP catalog provides them)
+straight through to the `POST /api/management/v4/catalogs/request`
+surface's `edc-federated-catalog-client`-compatible response. That
+mapping's own wire-shape test only exercises it against the plain
+`InMemoryCatalogCache`, not a real `OxigraphCatalogCache`; the live demo
+stack (`ds-labs-org/ds-dev-deployment`) does exercise the full chain and
+was checked manually, but no automated test yet proves these fields
+survive a real Oxigraph round-trip end to end (see the "Known
+limitation" note in `rdf_store::oxigraph_backend`'s module doc).
+
+![Internal architecture of the semantic cache: crawler parses a crawled catalog into a domain value plus a generic properties bag, upserts both through the CatalogCache trait, OxigraphCatalogCache stores one named graph per origin node as real DCAT triples plus one triple per property, and the two serving surfaces (catalog cache API, management API) read the triples and the decoded properties back out via SPARQL](docs/diagrams/semantic-cache-architecture.svg)
 
 ## Current status vs. target scope
 

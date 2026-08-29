@@ -1,20 +1,20 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 660" role="img"
-     aria-label="Internal architecture of the semantic cache. crates/crawler parses a crawled DSP response into a catalog_core::Catalog domain value and upserts it through the CatalogCache trait. The Oxigraph-backed implementation stores each origin node as its own named graph. Today that graph holds a single opaque JSON-literal triple, which is a real gap: it cannot support meaningful SPARQL queries over dataset properties. Real RDF decomposition of Dataset, Offer, and Distribution into actual triples is required, not optional, for this product's two serving surfaces: a per-participant dataset list and a SPARQL query endpoint. Neither surface answers the Dataspace Protocol's own CatalogRequestMessage.">
+     aria-label="Internal architecture of the semantic cache. crates/crawler parses a crawled DSP response into a catalog_core::Catalog domain value, including a generic properties map, and upserts it through the CatalogCache trait. The Oxigraph-backed implementation stores each origin node as its own named graph, decomposed into real DCAT triples (dcat:Catalog, dcat:Dataset, dcat:Distribution, dcat:DataService) plus one triple per generic property, using fcns:property/&lt;key&gt; as the predicate. crawler::collect_datasets_and_services populates title, description, version, creatorName, thumbnail, and keywords this way when the source catalog provides them; any other property key round-trips the same way. Three HTTP surfaces read from the store: a per-participant dataset list, a real SPARQL 1.1 query endpoint, and the management API's catalog request endpoint, which decodes properties back into the federated-catalog-client wire format. No automated test yet proves the properties round-trip through a real Oxigraph store end to end; only the live demo stack was checked manually. None of these surfaces answer the Dataspace Protocol's own CatalogRequestMessage.">
   <style>
     .bg { fill: #ffffff; }
     .box { fill: #f8fafc; stroke: #334155; stroke-width: 1.5; }
     .trait { fill: #fffbeb; stroke: #b45309; stroke-width: 1.5; stroke-dasharray: 5 3; }
     .cache { fill: #ecfdf5; stroke: #047857; stroke-width: 1.5; }
     .graph { fill: #ffffff; stroke: #047857; stroke-width: 1; }
-    .gap { fill: #fef2f2; stroke: #b91c1c; stroke-width: 1.5; }
+    .mech { fill: #eef2ff; stroke: #4338ca; stroke-width: 1.5; }
     .label { fill: #0f172a; font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif; font-size: 13px; }
     .sublabel { fill: #1e293b; font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif; font-size: 11.5px; }
-    .mono { fill: #1e293b; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+    .mono { fill: #1e293b; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; }
     .caption { fill: #475569; font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif; font-size: 11px; }
     .title { fill: #0f172a; font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif; font-size: 15px; font-weight: 600; }
     .traittext { fill: #92400e; }
     .cachetext { fill: #065f46; }
-    .gaptext { fill: #991b1b; }
+    .mechtext { fill: #3730a3; }
     .flow { stroke: #334155; stroke-width: 1.5; fill: none; }
     .read { stroke: #6d28d9; stroke-width: 1.5; fill: none; }
     @media (prefers-color-scheme: dark) {
@@ -23,7 +23,7 @@
       .trait { fill: #2a1e05; stroke: #fbbf24; }
       .cache { fill: #052e21; stroke: #34d399; }
       .graph { fill: #0b1220; stroke: #34d399; }
-      .gap { fill: #2a0e0e; stroke: #f87171; }
+      .mech { fill: #1e1b4b; stroke: #818cf8; }
       .label { fill: #e2e8f0; }
       .sublabel { fill: #e2e8f0; }
       .mono { fill: #cbd5e1; }
@@ -31,7 +31,7 @@
       .title { fill: #f1f5f9; }
       .traittext { fill: #fde68a; }
       .cachetext { fill: #6ee7b7; }
-      .gaptext { fill: #fca5a5; }
+      .mechtext { fill: #c7d2fe; }
       .flow { stroke: #94a3b8; }
       .read { stroke: #a78bfa; }
     }
@@ -53,14 +53,14 @@
   <!-- crawler -->
   <rect class="box" x="40" y="64" width="230" height="72" rx="6" />
   <text class="label" x="155" y="88" text-anchor="middle">crawler::crawl_once</text>
-  <text class="sublabel" x="155" y="108" text-anchor="middle">parse_catalog_response()</text>
-  <text class="caption" x="155" y="124" text-anchor="middle">one crawled participant's JSON</text>
+  <text class="sublabel" x="155" y="108" text-anchor="middle">collect_datasets_and_services()</text>
+  <text class="caption" x="155" y="124" text-anchor="middle">title, description, thumbnail, ...</text>
 
   <!-- domain type -->
   <rect class="box" x="310" y="64" width="230" height="72" rx="6" />
   <text class="label" x="425" y="88" text-anchor="middle">catalog_core::Catalog</text>
   <text class="sublabel" x="425" y="108" text-anchor="middle">domain value</text>
-  <text class="caption" x="425" y="124" text-anchor="middle">Dataset / DataService / origin_node</text>
+  <text class="caption" x="425" y="124" text-anchor="middle">Dataset { properties: BTreeMap, .. }</text>
 
   <!-- trait -->
   <rect class="trait" x="580" y="64" width="230" height="72" rx="6" />
@@ -79,19 +79,19 @@
   <!-- named graphs -->
   <rect class="graph" x="170" y="226" width="200" height="122" rx="6" />
   <text class="label" x="270" y="248" text-anchor="middle">Named graph: node A</text>
-  <text class="mono" x="270" y="270" text-anchor="middle">&lt;node-A-iri&gt;</text>
-  <text class="mono" x="270" y="286" text-anchor="middle">catalogJson</text>
-  <text class="mono" x="270" y="302" text-anchor="middle">"{...whole Catalog</text>
-  <text class="mono" x="270" y="316" text-anchor="middle">as JSON literal...}"</text>
-  <text class="caption" x="270" y="338" text-anchor="middle">one opaque triple today — the gap below</text>
+  <text class="mono" x="270" y="268" text-anchor="middle">&lt;ds-1&gt; a dcat:Dataset ;</text>
+  <text class="mono" x="270" y="283" text-anchor="middle">  dct:format "..." ;</text>
+  <text class="mono" x="270" y="298" text-anchor="middle">  fcns:property/title</text>
+  <text class="mono" x="270" y="313" text-anchor="middle">  "Air Quality Sensors" .</text>
+  <text class="caption" x="270" y="336" text-anchor="middle">real DCAT triples + property triples</text>
 
   <rect class="graph" x="390" y="226" width="200" height="122" rx="6" />
   <text class="label" x="490" y="248" text-anchor="middle">Named graph: node B</text>
-  <text class="mono" x="490" y="270" text-anchor="middle">&lt;node-B-iri&gt;</text>
-  <text class="mono" x="490" y="286" text-anchor="middle">catalogJson</text>
-  <text class="mono" x="490" y="302" text-anchor="middle">"{...whole Catalog</text>
-  <text class="mono" x="490" y="316" text-anchor="middle">as JSON literal...}"</text>
-  <text class="caption" x="490" y="338" text-anchor="middle">same shape, different graph</text>
+  <text class="mono" x="490" y="268" text-anchor="middle">&lt;ds-7&gt; a dcat:Dataset ;</text>
+  <text class="mono" x="490" y="283" text-anchor="middle">  dcat:accessService &lt;svc&gt; ;</text>
+  <text class="mono" x="490" y="298" text-anchor="middle">  fcns:property/version</text>
+  <text class="mono" x="490" y="313" text-anchor="middle">  "2.3.0" .</text>
+  <text class="caption" x="490" y="336" text-anchor="middle">same shape, different graph</text>
 
   <rect class="graph" x="610" y="226" width="200" height="122" rx="6" stroke-dasharray="4 3" />
   <text class="label" x="710" y="248" text-anchor="middle">Named graph: node N</text>
@@ -100,25 +100,32 @@
   <text class="caption" x="710" y="302" text-anchor="middle">re-crawled = replaced</text>
   <text class="caption" x="710" y="318" text-anchor="middle">wholesale on upsert()</text>
 
-  <!-- the real gap, promoted, not a footnote -->
-  <rect class="gap" x="170" y="396" width="640" height="92" rx="6" />
-  <text class="gaptext title" x="490" y="420" text-anchor="middle">Gap: not yet a real triple store</text>
-  <text class="gaptext sublabel" x="490" y="440" text-anchor="middle">One opaque JSON-literal triple per graph cannot support meaningful SPARQL over</text>
-  <text class="gaptext sublabel" x="490" y="456" text-anchor="middle">dataset properties. Needs real Dataset/Offer/Distribution/DataService triples and a</text>
-  <text class="gaptext sublabel" x="490" y="472" text-anchor="middle">real vocabulary (DCAT/ODRL, matching what DSP itself reuses) — see gap analysis doc</text>
+  <!-- the generic-properties mechanism, promoted, not a footnote -->
+  <rect class="mech" x="170" y="396" width="640" height="92" rx="6" />
+  <text class="mechtext title" x="490" y="420" text-anchor="middle">Generic properties → triples</text>
+  <text class="mechtext sublabel" x="490" y="440" text-anchor="middle">Each Dataset.properties entry becomes one triple: &lt;dataset-iri&gt; fcns:property/&lt;key&gt; "&lt;value&gt;" .</text>
+  <text class="mechtext sublabel" x="490" y="456" text-anchor="middle">crawler populates title/description/version/creatorName/thumbnail/keywords this way when present;</text>
+  <text class="mechtext sublabel" x="490" y="472" text-anchor="middle">any other key round-trips the same way — see rdf_store::oxigraph_backend's module doc for the mapping</text>
 
-  <!-- http-api reads, this product's ONLY two serving surfaces -->
-  <rect class="box" x="170" y="520" width="320" height="64" rx="6" />
-  <text class="label" x="330" y="544" text-anchor="middle">http-api: dataset list per participant</text>
-  <text class="caption" x="330" y="564" text-anchor="middle">non-DSP</text>
+  <!-- http-api reads, this product's three serving surfaces -->
+  <rect class="box" x="170" y="520" width="200" height="64" rx="6" />
+  <text class="label" x="270" y="544" text-anchor="middle">http-api: GET /catalog</text>
+  <text class="caption" x="270" y="564" text-anchor="middle">non-DSP, per participant</text>
 
-  <rect class="box" x="520" y="520" width="290" height="64" rx="6" />
-  <text class="label" x="665" y="544" text-anchor="middle">http-api: SPARQL endpoint</text>
-  <text class="caption" x="665" y="564" text-anchor="middle">missing today — needs the fix above first</text>
+  <rect class="box" x="390" y="520" width="200" height="64" rx="6" />
+  <text class="label" x="490" y="544" text-anchor="middle">http-api: /sparql</text>
+  <text class="caption" x="490" y="564" text-anchor="middle">SPARQL 1.1, GET/POST</text>
 
-  <path class="read" marker-end="url(#arrow-read)" d="M 330,520 L 330,488" />
-  <path class="read" marker-end="url(#arrow-read)" d="M 665,520 L 665,488" />
-  <text class="caption" x="490" y="504" text-anchor="middle">query() / SPARQL evaluation</text>
+  <rect class="box" x="610" y="520" width="200" height="64" rx="6" />
+  <text class="label" x="710" y="538" text-anchor="middle">http-api: mgmt API</text>
+  <text class="sublabel" x="710" y="554" text-anchor="middle">POST .../catalogs/request</text>
+  <text class="caption" x="710" y="570" text-anchor="middle">decodes properties back</text>
 
-  <text class="caption" x="490" y="616" text-anchor="middle">Neither surface answers the DSP CatalogRequestMessage — that's the connector's other components' job</text>
+  <path class="read" marker-end="url(#arrow-read)" d="M 270,520 L 270,488" />
+  <path class="read" marker-end="url(#arrow-read)" d="M 490,520 L 490,488" />
+  <path class="read" marker-end="url(#arrow-read)" d="M 710,520 L 710,488" />
+  <text class="caption" x="490" y="504" text-anchor="middle">query() / SPARQL evaluation / properties decode</text>
+
+  <text class="caption" x="490" y="610" text-anchor="middle">None of these surfaces answer the DSP CatalogRequestMessage — that's the connector's other components' job.</text>
+  <text class="caption" x="490" y="626" text-anchor="middle">The full crawl → Oxigraph → mgmt-API round trip for properties is checked manually, not yet by an automated test (see README).</text>
 </svg>
