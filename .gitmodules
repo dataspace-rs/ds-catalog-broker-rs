@@ -9,4 +9,4 @@
 	url = https://github.com/contreforts-ai/contreforts-config.git
 [submodule "compliance/dcp-test-env"]
 	path = compliance/dcp-test-env
-	url = https://github.com/ds-labs-org/dev-dev-deployment.git
+	url = https://github.com/ds-labs-org/ds-dev-deployment.git
