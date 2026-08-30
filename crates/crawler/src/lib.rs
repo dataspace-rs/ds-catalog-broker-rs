@@ -295,6 +295,11 @@ fn collect_datasets_and_services(value: &Value, catalog: &mut Catalog) {
                 id: dataset_id.to_string(),
                 properties: Default::default(),
                 distributions: Vec::new(),
+                // TODO(gap analysis §3.4): populate from the dataset's
+                // `odrl:hasPolicy` triples once policy parsing lands here;
+                // this foundation-phase commit only adds the domain type
+                // (catalog_core::Policy) that this field will be filled with.
+                policies: Vec::new(),
             };
 
             // Optional descriptive fields, folded verbatim into the

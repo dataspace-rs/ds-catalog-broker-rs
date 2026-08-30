@@ -133,6 +133,7 @@ pub async fn seed_sample_catalog(cache: &dyn CatalogCache) -> StoreResult<()> {
                 format: "application/json".to_string(),
                 access_service: "sample-data-service".to_string(),
             }],
+            policies: Vec::new(),
         });
     }
     catalog.data_services.push(DataService {
@@ -1044,6 +1045,7 @@ mod tests {
                 format: "application/json".to_string(),
                 access_service: service_id.clone(),
             }],
+            policies: Vec::new(),
         });
         catalog.data_services.push(DataService {
             id: service_id,
@@ -1864,6 +1866,7 @@ mod tests {
             id: "DATASET-C".to_string(),
             properties: Default::default(),
             distributions: vec![],
+            policies: Vec::new(),
         });
         state.cache.upsert(no_service_catalog).await.unwrap();
         state

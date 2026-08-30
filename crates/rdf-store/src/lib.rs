@@ -1111,6 +1111,11 @@ pub mod oxigraph_backend {
                     id,
                     properties,
                     distributions,
+                    // TODO(gap analysis §3.4): reconstruct from odrl:hasPolicy
+                    // triples once the write path emits them; this
+                    // foundation-phase commit only adds the domain type
+                    // (catalog_core::Policy), not the RDF mapping.
+                    policies: Vec::new(),
                 },
             ))
         }
@@ -1405,6 +1410,7 @@ pub mod oxigraph_backend {
                         access_service: "svc-1".to_string(),
                     },
                 ],
+                policies: Vec::new(),
             });
             catalog.datasets.push(Dataset {
                 id: "ds-2".to_string(),
@@ -1413,6 +1419,7 @@ pub mod oxigraph_backend {
                     format: "text/csv".to_string(),
                     access_service: "svc-2".to_string(),
                 }],
+                policies: Vec::new(),
             });
 
             catalog.data_services.push(DataService {
@@ -1645,6 +1652,7 @@ pub mod oxigraph_backend {
                 id: "only-dataset".to_string(),
                 properties: BTreeMap::new(),
                 distributions: vec![],
+                policies: Vec::new(),
             });
             cache.upsert(smaller.clone()).await.unwrap();
 

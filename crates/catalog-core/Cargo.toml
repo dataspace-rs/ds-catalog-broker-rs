@@ -8,3 +8,6 @@ description = "Minimal domain types for the federated catalog rewrite: node iden
 
 [dependencies]
 serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
