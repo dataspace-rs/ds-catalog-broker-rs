@@ -38,7 +38,8 @@ Three serving surfaces, all non-DSP:
   real EDC Federated Catalog UI tooling
   (`edc-federated-catalog-client`'s `list_offers`/`get_offer_by_dataset_id`):
   a `QuerySpec`-shaped request, a `Vec<FederatedCatalogOffer>` response.
-  `hasPolicy` is always empty (no ODRL model yet, see "Known gaps");
+  `hasPolicy` carries a crawled dataset's real ODRL policies (atomic
+  constraints only, see "Known gaps");
   `title`/`description`/`version`/`creator`/`thumbnail`/`keywords` are
   populated whenever a crawled dataset carries them.
 
@@ -56,7 +57,8 @@ Rust crates rather than Java SPI modules, echoing EDC's `crawler-spi` /
 `federated-catalog-spi` split:
 
 - `catalog-core` — domain types: participant/node id, crawl work item,
-  `Catalog`/`Dataset`/`DataService`. No ODRL policy model yet.
+  `Catalog`/`Dataset`/`DataService`, and a real ODRL `Policy`/`Rule`/
+  `Constraint` model (atomic constraints only).
 - `rdf-store` — the semantic cache: `CatalogCache` trait, in-memory and
   Oxigraph-backed implementations. See ["The RDF backend"](#the-rdf-backend-semantic-cache).
 - `dcp-core` — DCP JWS sign/verify and `did:web` primitives, used by
@@ -91,10 +93,10 @@ stored. `ds-catalog-broker-rs` falls back to a plain `InMemoryCatalogCache`
 
 **Real DCAT triples, not a JSON-blob bridge.** Each crawled `Catalog` is
 decomposed into `dcat:Catalog`/`dcat:Dataset`/`dcat:Distribution`/
-`dcat:DataService`/`dct:format` triples per named graph — see
-`rdf_store::oxigraph_backend`'s module doc for the exact mapping. No
-ODRL `Offer`/`Policy` triples yet (`catalog-core::Dataset` has no such
-field to derive them from).
+`dcat:DataService`/`dct:format` triples per named graph, plus real
+`odrl:hasPolicy`/`odrl:permission`/`odrl:prohibition`/`odrl:obligation`/
+`odrl:constraint` triples for each dataset's harvested policies — see
+`rdf_store::oxigraph_backend`'s module doc for the exact mapping.
 
 `Dataset.properties: BTreeMap<String, String>` round-trips transparently
 as one `fcns:property/<key>` triple per entry, with no schema change
@@ -110,11 +112,17 @@ end to end (see the "Known limitation" note in the module doc).
 
 ## Known gaps
 
-No ODRL policy/offer model: a harvested dataset's usage policy isn't
-preserved when re-served, though the spec says a broker "SHOULD honor
-upstream access control requirements." See
-[`docs/gap-analysis-2026-08-27.md`](docs/gap-analysis-2026-08-27.md) for
-history and the full punch list.
+ODRL policies are preserved and propagated end to end — crawl, semantic
+cache, management API — but only *atomic* constraints
+(`leftOperand`/`operator`/`rightOperand`); nested logical-constraint
+groups (`odrl:and`/`odrl:or`/`odrl:xone`) aren't modeled, and a crawled
+constraint shaped that way is skipped rather than guessed at. Whether the
+broker should also *filter* what it re-serves based on policy (e.g. hide
+a dataset a given caller isn't entitled to) is a genuinely open design
+question this product does not currently answer — nothing filters on
+policy content today. See
+[`docs/gap-analysis-2026-08-27.md`](docs/gap-analysis-2026-08-27.md) §3.4
+for history and the full punch list.
 
 ## Vendored dependencies
 
