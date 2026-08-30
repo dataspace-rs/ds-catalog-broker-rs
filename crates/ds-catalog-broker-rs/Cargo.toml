@@ -48,3 +48,12 @@ base64 = { workspace = true }
 # wire format is this product's own responsibility, proven correct against
 # the real client rather than borrowed from it.
 edc-federated-catalog-client = "0.2.5"
+# The same real ODRL `Policy`/`Permission`/`Prohibition`/`Constraint` types
+# `edc-federated-catalog-client`'s own `Dataset::has_policy` deserializes
+# into (see that crate's own Cargo.toml for this exact `package =` rename
+# pattern) - used only in lib.rs's wire-compat test, to assert on the real
+# deserialized policy content field-by-field, not just that the array is
+# non-empty. Pinned to the version this workspace's Cargo.lock already
+# resolves `edc-federated-catalog-client` 0.2.5's own dependency to, so
+# there is exactly one copy of these types in the dependency graph.
+edc-connector-client = { version = "0.6.8", package = "edc-connector-client-next" }

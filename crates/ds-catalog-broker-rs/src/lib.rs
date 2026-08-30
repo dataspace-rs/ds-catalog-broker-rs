@@ -23,7 +23,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use catalog_core::{Catalog, DataService, Dataset, Distribution, NodeId};
+use catalog_core::{Catalog, DataService, Dataset, Distribution, NodeId, Policy, PolicyKind, Rule};
 pub use dcp_core::HolderIdentity;
 pub use oauth2::{OAuth2Config, OAuth2Verifier, VerifyError};
 use rdf_store::oxigraph_backend::{OxigraphCatalogCache, SparqlError};
@@ -133,6 +133,7 @@ pub async fn seed_sample_catalog(cache: &dyn CatalogCache) -> StoreResult<()> {
                 format: "application/json".to_string(),
                 access_service: "sample-data-service".to_string(),
             }],
+            policies: Vec::new(),
         });
     }
     catalog.data_services.push(DataService {
@@ -385,13 +386,15 @@ struct CatalogRequestOffer {
     originator: String,
 }
 
-/// Matches `models::Dataset`. `has_policy` is always present as an empty
-/// array, never omitted: the real struct has no `#[serde(default)]` on
-/// that field, so it's required on the wire, and an empty array is the
-/// only honest content for it today - `catalog-core::Dataset` has no real
-/// ODRL policy model yet (`docs/gap-analysis-2026-08-27.md` §3.4, an
-/// already-documented, still-open gap this route does not attempt to
-/// paper over with invented policy content).
+/// Matches `models::Dataset`. `has_policy` is always present (the real
+/// struct has no `#[serde(default)]` on that field, so it's required on
+/// the wire) and now carries this dataset's real, harvested
+/// `catalog_core::Policy` entries, built by `dataset_to_offer` from
+/// `catalog_core::Dataset.policies` - genuine ODRL data preserved from
+/// what a crawled participant actually advertised, not the placeholder
+/// this route used to emit unconditionally (`docs/gap-analysis-2026-08-27.md`
+/// §3.4). It's an empty array, never omitted, when the harvested dataset
+/// had no policies at all.
 ///
 /// `title`/`description`/`version`/`creator`/`thumbnail`/`keywords` are the
 /// optional descriptive fields sourced from `catalog_core::Dataset.properties`
@@ -406,6 +409,14 @@ struct CatalogRequestDataset {
     id: String,
     #[serde(rename = "@type")]
     r#type: String,
+    /// One `serde_json::Value` per `catalog_core::Policy`, built by
+    /// `dataset_to_offer` via `policy_to_json` - hand-built JSON rather
+    /// than the real `edc_connector_client::types::policy::Policy` type
+    /// (see this struct's own doc comment for why: this route
+    /// deliberately doesn't depend on that crate in production code) but
+    /// shaped to satisfy every one of that type's required-field rules,
+    /// so a real client deserializes it into a genuine `Policy`, not an
+    /// approximation of one.
     #[serde(rename = "http://www.w3.org/ns/odrl/2/hasPolicy")]
     has_policy: Vec<serde_json::Value>,
     name: String,
@@ -516,6 +527,106 @@ fn catalog_to_offer(catalog: &Catalog) -> Option<CatalogRequestOffer> {
     })
 }
 
+/// Builds one `hasPolicy` entry from a harvested `catalog_core::Policy`,
+/// as a raw `serde_json::Value` (see `CatalogRequestDataset::has_policy`'s
+/// doc comment for why this is hand-built JSON rather than the real
+/// `edc_connector_client::types::policy::Policy` type).
+///
+/// Every key emitted here exists because the real struct requires it with
+/// no `#[serde(default)]` (verified against
+/// `edc-connector-client-next` 0.6.8's `src/types/policy.rs`); every key
+/// omitted exists because the real struct marks it optional
+/// (`Option` with `skip_serializing_if`, or a `Vec` with `#[serde(default)]`)
+/// and this route follows its own established convention elsewhere in this
+/// file of omitting rather than emitting empty/null placeholders:
+///
+/// - `@type` is always present - `Policy.kind` has no `#[serde(default)]`,
+///   so it's required on the wire even though `PolicyKind` itself derives
+///   `Default`.
+/// - `@id` only when `Policy.id` is `Some`.
+/// - `odrl:assigner`/`odrl:assignee` only when `Some` - and under exactly
+///   those prefixed keys, not the plain `assigner`/`assignee` names, since
+///   the real struct's `assigner`/`assignee` fields carry no plain
+///   `#[serde(rename)]`, only `alias`es for the prefixed and full-IRI forms
+///   (aliases apply only on *read*; emitting the plain name would silently
+///   fail to round-trip through the real type).
+/// - `permission`/`prohibition`/`obligation` arrays only when non-empty.
+/// - each `Rule` -> `{"action": ..., "constraint": [...]}`, `action` always
+///   present (required on the real `Permission`/`Prohibition`/`Obligation`
+///   types), `constraint` only when non-empty.
+/// - each `Constraint` -> `{"leftOperand": ..., "operator": ...,
+///   "rightOperand": ...}`, all three always present - `AtomicConstraint`
+///   requires all three with no defaults. `catalog_core::Constraint` only
+///   models atomic constraints in the first place (see its own doc
+///   comment), so there is never a logical-group shape to emit here.
+fn policy_to_json(policy: &Policy) -> serde_json::Value {
+    let kind = match policy.kind {
+        PolicyKind::Set => "Set",
+        PolicyKind::Offer => "Offer",
+        PolicyKind::Agreement => "Agreement",
+    };
+    let mut value = serde_json::json!({ "@type": kind });
+    let object = value.as_object_mut().expect("built as a JSON object above");
+
+    if let Some(id) = &policy.id {
+        object.insert("@id".to_string(), serde_json::Value::String(id.clone()));
+    }
+    if let Some(assigner) = &policy.assigner {
+        object.insert(
+            "odrl:assigner".to_string(),
+            serde_json::Value::String(assigner.clone()),
+        );
+    }
+    if let Some(assignee) = &policy.assignee {
+        object.insert(
+            "odrl:assignee".to_string(),
+            serde_json::Value::String(assignee.clone()),
+        );
+    }
+    if !policy.permissions.is_empty() {
+        object.insert(
+            "permission".to_string(),
+            serde_json::Value::Array(policy.permissions.iter().map(rule_to_json).collect()),
+        );
+    }
+    if !policy.prohibitions.is_empty() {
+        object.insert(
+            "prohibition".to_string(),
+            serde_json::Value::Array(policy.prohibitions.iter().map(rule_to_json).collect()),
+        );
+    }
+    if !policy.obligations.is_empty() {
+        object.insert(
+            "obligation".to_string(),
+            serde_json::Value::Array(policy.obligations.iter().map(rule_to_json).collect()),
+        );
+    }
+
+    value
+}
+
+/// Builds one `permission`/`prohibition`/`obligation` entry from a
+/// harvested `catalog_core::Rule` - see `policy_to_json`'s doc comment for
+/// which keys are required vs. optional on the real side.
+fn rule_to_json(rule: &Rule) -> serde_json::Value {
+    let mut value = serde_json::json!({ "action": rule.action });
+    if !rule.constraints.is_empty() {
+        value["constraint"] = serde_json::Value::Array(
+            rule.constraints
+                .iter()
+                .map(|constraint| {
+                    serde_json::json!({
+                        "leftOperand": constraint.left_operand,
+                        "operator": constraint.operator,
+                        "rightOperand": constraint.right_operand,
+                    })
+                })
+                .collect(),
+        );
+    }
+    value
+}
+
 /// Reads the optional descriptive properties `crawler::collect_datasets_and_services`
 /// wrote into `dataset.properties` (`title`, `description`, `version`,
 /// `creatorName`, `thumbnail`, `keywords`) back out and populates the
@@ -564,7 +675,7 @@ fn dataset_to_offer(dataset: &Dataset) -> CatalogRequestDataset {
     CatalogRequestDataset {
         id: dataset.id.clone(),
         r#type: "Dataset".to_string(),
-        has_policy: Vec::new(),
+        has_policy: dataset.policies.iter().map(policy_to_json).collect(),
         name: dataset.id.clone(),
         content_type: dataset
             .distributions
@@ -1044,6 +1155,7 @@ mod tests {
                 format: "application/json".to_string(),
                 access_service: service_id.clone(),
             }],
+            policies: Vec::new(),
         });
         catalog.data_services.push(DataService {
             id: service_id,
@@ -1594,6 +1706,11 @@ mod tests {
     // stand-in - a genuine round-trip proof, not just "200 and looks like
     // JSON".
 
+    use catalog_core::Constraint;
+    use edc_connector_client::types::policy::{
+        Constraint as RealConstraint, LeftOperand, Operator, PolicyKind as RealPolicyKind,
+    };
+    use edc_connector_client::types::properties::PropertyValue;
     use edc_federated_catalog_client::ListOfferBody;
     use edc_federated_catalog_client::models::FederatedCatalogOffer;
 
@@ -1607,20 +1724,42 @@ mod tests {
     }
 
     /// The strongest proof this route needs: a real `Vec<catalog_core::Catalog>`
-    /// fixture, seeded into a real cache, queried through the real router
-    /// via `oneshot` with the real client's own `ListOfferBody::default()`
-    /// as the request body, and the raw response bytes literally
-    /// deserialized with `Vec<edc_federated_catalog_client::models::FederatedCatalogOffer>` -
+    /// fixture - including a real, non-trivial harvested `catalog_core::Policy`
+    /// (gap analysis §3.4) - seeded into a real cache, queried through the
+    /// real router via `oneshot` with the real client's own
+    /// `ListOfferBody::default()` as the request body, and the raw response
+    /// bytes literally deserialized with
+    /// `Vec<edc_federated_catalog_client::models::FederatedCatalogOffer>` -
     /// asserting on the parsed Rust struct's fields, which only compiles
     /// and passes if the wire format genuinely matches field for field.
+    /// The policy assertions below are the single most important ones in
+    /// this test: they prove a real, unmodified EDC Federated Catalog UI
+    /// component would actually understand the harvested policy content
+    /// this route serves, not just that an array happens to be non-empty.
     #[tokio::test]
     async fn catalog_request_route_response_deserializes_with_the_real_client_offer_type() {
         let state = test_state();
-        state
-            .cache
-            .upsert(participant_catalog("node-a", "cat-a", "DATASET-A"))
-            .await
-            .unwrap();
+        let mut catalog = participant_catalog("node-a", "cat-a", "DATASET-A");
+        catalog.datasets[0].policies.push(Policy {
+            id: Some("policy-1".to_string()),
+            kind: PolicyKind::Offer,
+            assigner: Some("did:example:node-a".to_string()),
+            assignee: None,
+            permissions: vec![Rule {
+                action: "odrl:use".to_string(),
+                constraints: vec![Constraint {
+                    left_operand: "odrl:dateTime".to_string(),
+                    operator: "odrl:lteq".to_string(),
+                    right_operand: "2027-01-01T00:00:00Z".to_string(),
+                }],
+            }],
+            prohibitions: vec![Rule {
+                action: "odrl:distribute".to_string(),
+                constraints: Vec::new(),
+            }],
+            obligations: Vec::new(),
+        });
+        state.cache.upsert(catalog).await.unwrap();
 
         let app = build_router(state);
         let request_body = serde_json::to_vec(&ListOfferBody::default()).unwrap();
@@ -1653,17 +1792,92 @@ mod tests {
         assert_eq!(dataset.r#type, "Dataset");
         assert_eq!(dataset.name, "DATASET-A");
         assert_eq!(dataset.content_type, "application/json");
-        assert!(
-            dataset.has_policy.is_empty(),
-            "hasPolicy must be present but empty - catalog-core has no real ODRL policy model \
-             yet (gap analysis §3.4)"
-        );
         assert_eq!(dataset.title, None);
         assert_eq!(dataset.description, None);
         assert_eq!(dataset.version, None);
         assert_eq!(dataset.creator, None);
         assert_eq!(dataset.thumbnail, None);
         assert!(dataset.keywords.is_empty());
+
+        // The real proof: the harvested policy round-tripped through this
+        // route's hand-built JSON and came back out as a genuine
+        // `edc_connector_client::types::policy::Policy`, with every field
+        // this test seeded intact.
+        assert_eq!(dataset.has_policy.len(), 1);
+        let policy = &dataset.has_policy[0];
+        assert_eq!(policy.id(), Some(&"policy-1".to_string()));
+        assert_eq!(policy.kind(), &RealPolicyKind::Offer);
+        assert_eq!(policy.assigner(), Some(&"did:example:node-a".to_string()));
+        assert_eq!(policy.assignee(), None);
+
+        assert_eq!(policy.permissions().len(), 1);
+        let permission = &policy.permissions()[0];
+        assert_eq!(permission.action().id(), "odrl:use");
+        assert_eq!(permission.constraints().len(), 1);
+        let RealConstraint::Atomic(atomic) = &permission.constraints()[0] else {
+            panic!("expected an atomic constraint, got a logical-group constraint");
+        };
+        assert!(matches!(
+            &atomic.left_operand,
+            LeftOperand::Simple(value) if value == "odrl:dateTime"
+        ));
+        assert!(matches!(
+            &atomic.operator,
+            Operator::Simple(value) if value == "odrl:lteq"
+        ));
+        assert_eq!(
+            atomic.right_operand,
+            PropertyValue(serde_json::Value::String(
+                "2027-01-01T00:00:00Z".to_string()
+            ))
+        );
+
+        assert_eq!(policy.prohibitions().len(), 1);
+        let prohibition = &policy.prohibitions()[0];
+        assert_eq!(prohibition.action().id(), "odrl:distribute");
+        assert!(prohibition.constraints().is_empty());
+
+        assert!(policy.obligations().is_empty());
+    }
+
+    /// Regression coverage for the empty case: a harvested dataset with no
+    /// policies at all must still serve `hasPolicy` as an empty JSON array,
+    /// not `null` or an omitted key - the real
+    /// `edc_connector_client::types::policy::Policy`-backed field has no
+    /// `#[serde(default)]`, so it's required on the wire even when there is
+    /// nothing to put in it.
+    #[tokio::test]
+    async fn catalog_request_route_response_serves_has_policy_as_an_empty_array_when_dataset_has_no_policies()
+     {
+        let state = test_state();
+        state
+            .cache
+            .upsert(participant_catalog("node-a", "cat-a", "DATASET-A"))
+            .await
+            .unwrap();
+
+        let app = build_router(state);
+        let request_body = serde_json::to_vec(&ListOfferBody::default()).unwrap();
+        let response = app
+            .oneshot(catalog_request(Body::from(request_body)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let raw: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let has_policy = &raw[0]["http://www.w3.org/ns/dcat#dataset"][0]["http://www.w3.org/ns/odrl/2/hasPolicy"];
+        assert_eq!(
+            has_policy,
+            &serde_json::Value::Array(Vec::new()),
+            "hasPolicy must be an explicit empty array, not omitted or null: {raw}"
+        );
+
+        // Also proves it round-trips through the real client type with a
+        // genuinely empty policy list, not just that our own raw JSON looks
+        // right.
+        let offers: Vec<FederatedCatalogOffer> = serde_json::from_slice(&body).unwrap();
+        assert!(offers[0].dataset[0].has_policy.is_empty());
     }
 
     /// The other half of the fixture above: every optional descriptive
@@ -1864,6 +2078,7 @@ mod tests {
             id: "DATASET-C".to_string(),
             properties: Default::default(),
             distributions: vec![],
+            policies: Vec::new(),
         });
         state.cache.upsert(no_service_catalog).await.unwrap();
         state

@@ -69,9 +69,13 @@
 //! gap analysis §3.2 (`docs/gap-analysis-2026-08-27.md`). See
 //! [`oxigraph_backend`]'s module doc for the exact subject/predicate/object
 //! mapping - the ADR-equivalent record this doc comment previously
-//! deferred to. `catalog-core::Dataset` still has no ODRL `Offer`/`Policy`
-//! field (gap analysis §3.4), so no ODRL triples are emitted yet; that
-//! remains future work; not guessed at here.
+//! deferred to. `catalog-core::Dataset` now carries a real ODRL `Policy`
+//! model (`Dataset.policies`, gap analysis §3.4), harvested from a crawled
+//! participant's `odrl:hasPolicy` triples rather than invented, and
+//! `oxigraph_backend` preserves it faithfully as real `odrl:` triples too -
+//! see that module's own doc comment for the exact mapping, including the
+//! deliberate atomic-constraints-only scope cut it inherits from
+//! `catalog_core::Constraint`.
 
 use async_trait::async_trait;
 use catalog_core::{Catalog, NodeId};
@@ -317,19 +321,30 @@ pub mod memory {
 /// (or DCTERMS) equivalent falls back to this project's own
 /// `https://federated-catalog-rs.internal/ns#` namespace.
 ///
-/// **No ODRL terms are emitted.** `catalog-core::Dataset` has no `Offer`/
-/// `Policy` field at all today (see its own doc comment, and gap analysis
-/// §3.4) - the only DSP `Offer`/`hasPolicy` representation that ever
-/// existed in this codebase was a hardcoded placeholder in the now-removed
-/// `http-api` DSP-serving layer, not data derived from anything a crawled
-/// participant actually said. Inventing an ODRL shape here to have
-/// *something* to point `odrl:` constants at would be exactly the "guess
-/// at policy semantics" gap analysis §3.4 explicitly says not to do. What
-/// *does* exist in the domain model - `Catalog.properties` and
-/// `Dataset.properties` - is faithfully preserved as real triples (see
-/// "Generic properties" below), so if a future crawler starts stuffing
-/// policy-relevant data into those maps, it already round-trips; it is
-/// just not yet modeled as `odrl:Offer`/`odrl:Policy` resources.
+/// **ODRL terms, real and harvested (gap analysis §3.4).** `catalog-core::Dataset`
+/// now carries `policies: Vec<Policy>` - real ODRL policy data derived from
+/// a crawled participant's own `odrl:hasPolicy` triples, not the hardcoded
+/// placeholder the now-removed `http-api` DSP-serving layer used to emit
+/// (see `Policy`'s own doc comment). A read-only catalog broker has no
+/// negotiation capability of its own, so "honoring" a harvested policy
+/// means preserving it faithfully end to end; this store's half of that is
+/// decomposing each `Policy` into real `odrl:` resources and triples
+/// (below), exactly the way `Catalog`/`Dataset`/`Distribution`/`DataService`
+/// are already decomposed into real `dcat:` ones, rather than folding
+/// policy data into the generic `Dataset.properties` bag or an opaque
+/// blob.
+///
+/// **Known limitation, not exercised by any current producer**: only
+/// *atomic* ODRL constraints (`odrl:leftOperand`/`odrl:operator`/
+/// `odrl:rightOperand` on one constraint resource) are ever written or
+/// read here - see `catalog_core::Constraint`'s own doc comment for why
+/// nested `odrl:and`/`odrl:or`/`odrl:andSequence`/`odrl:xone` logical
+/// constraint groups are out of scope. This store never has to defend
+/// against one reaching it: `crawler::parse_catalog_response` skips a
+/// constraint of that shape (with a tracing warning), one constraint at a
+/// time, before it is ever handed to `write_catalog`. Flagged here for the
+/// same reason the rest of this doc flags known gaps honestly, not
+/// because it is currently reachable.
 ///
 /// ### Namespaces
 ///
@@ -337,6 +352,7 @@ pub mod memory {
 /// |---|---|
 /// | `dcat:` | `http://www.w3.org/ns/dcat#` |
 /// | `dct:` | `http://purl.org/dc/terms/` |
+/// | `odrl:` | `http://www.w3.org/ns/odrl/2/` |
 /// | `rdf:` | `http://www.w3.org/1999/02/22-rdf-syntax-ns#` |
 /// | `fcns:` (fallback) | `https://federated-catalog-rs.internal/ns#` |
 ///
@@ -356,6 +372,22 @@ pub mod memory {
 ///     blank node (predictable, queryable IRIs beat blank nodes here, and
 ///     the index doubles as the ordering key - see "Ordering" below).
 /// - **DataService resource**: `<base>/services/<data_service.id>`.
+/// - **Policy resource**: `<base>/datasets/<dataset.id>/policies/<index>` -
+///   like a distribution, a harvested policy is identified by its position
+///   in `dataset.policies` rather than by `Policy.id`: that field is an
+///   arbitrary, optional string harvested from the crawl (possibly absent,
+///   possibly not IRI-safe), not a trusted identifier this store can mint
+///   a resource IRI from. When present it is preserved separately as a
+///   literal instead (`fcns:policyId`, see "Triples emitted" below).
+/// - **Permission / Prohibition / Obligation resource** (one shape, shared
+///   by all three - see [`Rule`]): `<policy>/permissions/<index>`,
+///   `<policy>/prohibitions/<index>`, `<policy>/obligations/<index>`
+///   respectively. Each list's `<index>` restarts at 0 independently of
+///   the other two - they live under different path segments, so a
+///   permission and a prohibition at the same position never collide.
+/// - **Constraint resource**: `<rule>/constraints/<index>`, where `<rule>`
+///   is whichever permission/prohibition/obligation resource IRI the
+///   constraint belongs to.
 ///
 /// `Distribution.access_service` is a bare `String` in the domain model,
 /// not a typed foreign key - it is resolved to a DataService resource IRI
@@ -388,8 +420,60 @@ pub mod memory {
 /// - `<dataset> dcat:distribution <distribution> .` - one per
 ///   `Dataset.distributions` entry (`dcat:distribution` is DCAT's real
 ///   Dataset-to-Distribution property).
+/// - `<dataset> odrl:hasPolicy <policy> .` - one per `Dataset.policies`
+///   entry (`odrl:hasPolicy` is ODRL's real property for attaching a
+///   policy to an asset, and the exact term DSP catalogs advertise offers
+///   under).
 /// - `<dataset> <property-predicate> "<value>"` - one per
 ///   `Dataset.properties` entry; see "Generic properties" below.
+///
+/// For each policy resource `<policy>` (from `Dataset.policies`):
+/// - `<policy> rdf:type odrl:<Kind> .` - `odrl:Set` / `odrl:Offer` /
+///   `odrl:Agreement`, matching `Policy.kind` (see [`PolicyKind`]).
+/// - `<policy> fcns:sequenceIndex "<index>"^^xsd:integer .` - see
+///   "Ordering" below.
+/// - `<policy> fcns:policyId "<id>"` - only if `Policy.id` is `Some`. Not
+///   an ODRL term: in a real JSON-LD/RDF reading, a policy's `@id` *is*
+///   its subject IRI, but this store already mints its own positional
+///   subject IRI for a policy (see "Resource IRIs" above), so the
+///   harvested `@id` string needs a separate home to round-trip - there is
+///   no DCAT/ODRL term for "this resource's externally-advertised id, kept
+///   as a plain literal", so it falls back to this project's own
+///   namespace per the "Generic properties" rule below.
+/// - `<policy> odrl:assigner "<assigner>"` / `<policy> odrl:assignee "<assignee>"` -
+///   only if `Policy.assigner` / `Policy.assignee` is `Some`, as an IRI
+///   when the value parses as one (e.g. a DID) or a plain literal
+///   otherwise - the same IRI-or-literal treatment `dcat:endpointURL` gets
+///   below, for the same reason: ODRL's formal range for both properties
+///   is `odrl:Party` (an IRI-identified resource), but a harvested value
+///   isn't guaranteed to already be a valid IRI.
+/// - `<policy> odrl:permission <rule> .` / `<policy> odrl:prohibition <rule> .` /
+///   `<policy> odrl:obligation <rule> .` - one per entry in
+///   `Policy.permissions` / `Policy.prohibitions` / `Policy.obligations`
+///   respectively (ODRL's real property for each rule kind).
+///
+/// For each rule resource `<rule>` (a permission/prohibition/obligation,
+/// from `Policy.permissions`/`prohibitions`/`obligations`):
+/// - `<rule> fcns:sequenceIndex "<index>"^^xsd:integer .`
+/// - `<rule> odrl:action ...` - `Rule.action`, IRI-or-literal (ODRL
+///   actions are often a bare keyword like `"use"`, but can also be a full
+///   IRI, so the same fallback as `dcat:endpointURL`/`odrl:assigner`
+///   applies).
+/// - `<rule> odrl:constraint <constraint> .` - one per `Rule.constraints`
+///   entry.
+///
+/// For each constraint resource `<constraint>` (from `Rule.constraints`):
+/// - `<constraint> fcns:sequenceIndex "<index>"^^xsd:integer .`
+/// - `<constraint> odrl:leftOperand ...` - `Constraint.left_operand`,
+///   IRI-or-literal.
+/// - `<constraint> odrl:operator ...` - `Constraint.operator`,
+///   IRI-or-literal.
+/// - `<constraint> odrl:rightOperand "<value>"` - `Constraint.right_operand`,
+///   **always** a plain literal, never minted as an IRI even when the
+///   value happens to parse as one: a `rightOperand` is a value being
+///   compared against, not an identifier for another resource, so giving
+///   it the IRI-or-literal treatment would change its RDF shape based on
+///   incidental string content rather than ODRL semantics.
 ///
 /// For each distribution resource `<distribution>` (from
 /// `Dataset.distributions`):
@@ -445,12 +529,23 @@ pub mod memory {
 ///
 /// **Known limitation, not exercised by any current producer**: a
 /// property key that happens to be exactly one of this mapping's own
-/// reserved predicate IRIs (`rdf:type`, `dcat:dataset`, `dcat:service`,
+/// reserved predicate IRIs would collide with this mapping's own
+/// structural triples. For `Catalog.properties` and `Dataset.properties`
+/// specifically (the only two generic key/value bags in the domain model
+/// today - `Policy`/`Rule`/`Constraint` carry no such bag to collide
+/// against): `rdf:type`, `dcat:dataset`, `dcat:service`,
 /// `dcat:distribution`, `dcat:accessService`, `dcat:endpointURL`,
 /// `dcat:endpointDescription`, `dct:format`, `fcns:participantId`,
-/// `fcns:sequenceIndex`) would collide with this mapping's own structural
-/// triples. Flagged rather than defended against, since nothing produces
-/// such a key today.
+/// `fcns:sequenceIndex`, and (new with the ODRL mapping above)
+/// `odrl:hasPolicy` for `Dataset.properties`. The rest of the ODRL mapping's
+/// own structural predicates - `odrl:permission`, `odrl:prohibition`,
+/// `odrl:obligation`, `odrl:action`, `odrl:constraint`,
+/// `odrl:leftOperand`, `odrl:operator`, `odrl:rightOperand`,
+/// `odrl:assigner`, `odrl:assignee`, and `fcns:policyId` - are reserved on
+/// `Policy`/`Rule`/`Constraint` resources the same way, but those types
+/// have no generic property map at all, so there is nothing for them to
+/// collide with today either way. Flagged rather than defended against,
+/// since nothing produces a colliding key today.
 ///
 /// **Test-coverage gap, not a functional one**: this crate's own tests
 /// prove the generic-properties round trip through a real
@@ -471,16 +566,19 @@ pub mod memory {
 ///
 /// ### Ordering (`fcns:sequenceIndex`)
 ///
-/// `Catalog.datasets`, `Dataset.distributions`, and `Catalog.data_services`
-/// are all `Vec`s - order (and, for distributions, even exact duplicates)
-/// is part of `Catalog`'s `PartialEq`, but RDF triples are an unordered
-/// set. Each dataset/distribution/data-service resource therefore carries
-/// an explicit `fcns:sequenceIndex` integer literal recording its original
-/// position, and `query()` sorts by it when reconstructing each `Vec` -
-/// this is pure bookkeeping to make an ordered domain type round-trip
-/// through an unordered store faithfully, not domain data, hence the
-/// fallback namespace rather than a borrowed vocabulary term (DCAT has no
-/// concept of dataset/distribution ordering).
+/// `Catalog.datasets`, `Dataset.distributions`, `Catalog.data_services`,
+/// `Dataset.policies`, `Policy.permissions`/`prohibitions`/`obligations`,
+/// and `Rule.constraints` are all `Vec`s - order (and, for distributions
+/// and constraints, even exact duplicates) is part of `Catalog`'s
+/// `PartialEq`, but RDF triples are an unordered set. Each
+/// dataset/distribution/data-service/policy/rule/constraint resource
+/// therefore carries an explicit `fcns:sequenceIndex` integer literal
+/// recording its original position within its own parent list, and
+/// `query()` sorts by it when reconstructing each `Vec` - this is pure
+/// bookkeeping to make an ordered domain type round-trip through an
+/// unordered store faithfully, not domain data, hence the fallback
+/// namespace rather than a borrowed vocabulary term (neither DCAT nor ODRL
+/// has a concept of list ordering for any of these).
 ///
 /// This also implicitly assumes `Dataset.id` (and `DataService.id`) are
 /// unique within one catalog: two datasets sharing an id would collide
@@ -489,7 +587,7 @@ pub mod memory {
 /// `@id` means) and is not otherwise enforced by `catalog-core::Dataset`.
 pub mod oxigraph_backend {
     use super::*;
-    use catalog_core::{DataService, Dataset, Distribution};
+    use catalog_core::{Constraint, DataService, Dataset, Distribution, Policy, PolicyKind, Rule};
     use contreforts_kg::GraphError;
     use contreforts_kg::store::GraphStore;
     use oxigraph::model::{Literal, NamedNode, NamedOrBlankNode, Quad, Term};
@@ -503,6 +601,7 @@ pub mod oxigraph_backend {
     const INTERNAL_PROPERTY_PREFIX: &str = "https://federated-catalog-rs.internal/ns#property/";
     const DCAT_NS: &str = "http://www.w3.org/ns/dcat#";
     const DCT_NS: &str = "http://purl.org/dc/terms/";
+    const ODRL_NS: &str = "http://www.w3.org/ns/odrl/2/";
     const RDF_TYPE_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 
     impl From<GraphError> for StoreError {
@@ -636,6 +735,87 @@ pub mod oxigraph_backend {
         internal("sequenceIndex")
     }
 
+    fn odrl(local: &str) -> NamedNode {
+        iri(format!("{ODRL_NS}{local}"))
+    }
+
+    fn odrl_has_policy_pred() -> NamedNode {
+        odrl("hasPolicy")
+    }
+
+    fn odrl_permission_pred() -> NamedNode {
+        odrl("permission")
+    }
+
+    fn odrl_prohibition_pred() -> NamedNode {
+        odrl("prohibition")
+    }
+
+    fn odrl_obligation_pred() -> NamedNode {
+        odrl("obligation")
+    }
+
+    fn odrl_action_pred() -> NamedNode {
+        odrl("action")
+    }
+
+    fn odrl_constraint_pred() -> NamedNode {
+        odrl("constraint")
+    }
+
+    fn odrl_left_operand_pred() -> NamedNode {
+        odrl("leftOperand")
+    }
+
+    fn odrl_operator_pred() -> NamedNode {
+        odrl("operator")
+    }
+
+    fn odrl_right_operand_pred() -> NamedNode {
+        odrl("rightOperand")
+    }
+
+    fn odrl_assigner_pred() -> NamedNode {
+        odrl("assigner")
+    }
+
+    fn odrl_assignee_pred() -> NamedNode {
+        odrl("assignee")
+    }
+
+    /// `Policy.id`'s literal home - see the module doc's "Triples emitted"
+    /// section (policy resource bullets) for why this is a fallback
+    /// `fcns:` term rather than an ODRL one.
+    fn policy_id_pred() -> NamedNode {
+        internal("policyId")
+    }
+
+    /// The `odrl:<Kind>` class matching a [`PolicyKind`].
+    fn odrl_policy_class(kind: PolicyKind) -> NamedNode {
+        match kind {
+            PolicyKind::Set => odrl("Set"),
+            PolicyKind::Offer => odrl("Offer"),
+            PolicyKind::Agreement => odrl("Agreement"),
+        }
+    }
+
+    /// Inverse of [`odrl_policy_class`]: which [`PolicyKind`] a policy
+    /// resource's `rdf:type` object names.
+    fn policy_kind_from_class(class: &NamedNode) -> StoreResult<PolicyKind> {
+        if *class == odrl_policy_class(PolicyKind::Set) {
+            Ok(PolicyKind::Set)
+        } else if *class == odrl_policy_class(PolicyKind::Offer) {
+            Ok(PolicyKind::Offer)
+        } else if *class == odrl_policy_class(PolicyKind::Agreement) {
+            Ok(PolicyKind::Agreement)
+        } else {
+            Err(StoreError::Backend(format!(
+                "unrecognized ODRL policy type IRI: {}",
+                class.as_str()
+            )))
+        }
+    }
+
     /// The key/value-property fallback predicate for a key that isn't
     /// already an absolute IRI - see the module doc's "Generic properties".
     fn property_predicate(key: &str) -> NamedNode {
@@ -703,6 +883,24 @@ pub mod oxigraph_backend {
         ))
     }
 
+    fn policy_iri(node_base: &str, dataset_id: &str, index: usize) -> NamedNode {
+        iri(format!(
+            "{node_base}/datasets/{}/policies/{index}",
+            urlencoding::encode(dataset_id)
+        ))
+    }
+
+    /// A permission/prohibition/obligation resource IRI - `segment` is
+    /// `"permissions"`, `"prohibitions"`, or `"obligations"` (see the
+    /// module doc's "Resource IRIs").
+    fn rule_iri(policy_iri: &str, segment: &str, index: usize) -> NamedNode {
+        iri(format!("{policy_iri}/{segment}/{index}"))
+    }
+
+    fn constraint_iri(rule_iri: &str, index: usize) -> NamedNode {
+        iri(format!("{rule_iri}/constraints/{index}"))
+    }
+
     /// Strip `prefix` off `iri` and percent-decode the remainder - the
     /// inverse of how every resource IRI above was built from an id.
     fn strip_prefix_decode(iri: &str, prefix: &str) -> StoreResult<String> {
@@ -718,19 +916,25 @@ pub mod oxigraph_backend {
         strip_prefix_decode(graph_iri.as_str(), NODE_NS).map(NodeId::new)
     }
 
-    /// `endpoint_url` as an IRI object when it parses as one (the faithful
-    /// DCAT reading of `dcat:endpointURL`'s `rdfs:Resource` range), falling
-    /// back to a plain string literal when it doesn't - defensive, since
-    /// this string comes from crawled data this store should never reject.
-    fn endpoint_url_term(endpoint_url: &str) -> Term {
-        match NamedNode::new(endpoint_url) {
+    /// `value` as an IRI object when it parses as one, falling back to a
+    /// plain string literal when it doesn't - defensive, since every
+    /// caller of this helper is feeding it crawled/harvested data this
+    /// store should never reject for being the "wrong" shape. Originally
+    /// written just for `dcat:endpointURL` (the faithful DCAT reading of
+    /// its `rdfs:Resource` range); reused unchanged for the ODRL mapping's
+    /// `odrl:assigner`/`odrl:assignee`/`odrl:action`/`odrl:leftOperand`/
+    /// `odrl:operator` (see the module doc's "Triples emitted" section) -
+    /// none of those give a stronger guarantee than `endpoint_url` did
+    /// that a harvested value is already IRI-shaped.
+    fn iri_or_literal_term(value: &str) -> Term {
+        match NamedNode::new(value) {
             Ok(node) => Term::from(node),
-            Err(_) => Term::from(Literal::from(endpoint_url.to_string())),
+            Err(_) => Term::from(Literal::from(value.to_string())),
         }
     }
 
     /// A literal's lexical value, or a `NamedNode`'s IRI string - covers
-    /// both shapes [`endpoint_url_term`] can produce, so loading is
+    /// both shapes [`iri_or_literal_term`] can produce, so loading is
     /// agnostic to which one a given stored value took.
     fn term_as_string(term: &Term) -> StoreResult<String> {
         match term {
@@ -942,6 +1146,17 @@ pub mod oxigraph_backend {
                         graph,
                     )?;
                 }
+
+                for (policy_index, policy) in dataset.policies.iter().enumerate() {
+                    let policy_node = policy_iri(&base, &dataset.id, policy_index);
+                    self.insert(
+                        &dataset_node,
+                        &odrl_has_policy_pred(),
+                        &Term::from(policy_node.clone()),
+                        graph,
+                    )?;
+                    self.write_policy(policy, &policy_node, policy_index, graph)?;
+                }
             }
 
             for (index, service) in catalog.data_services.iter().enumerate() {
@@ -967,7 +1182,7 @@ pub mod oxigraph_backend {
                 self.insert(
                     &service_node,
                     &dcat_endpoint_url_pred(),
-                    &endpoint_url_term(&service.endpoint_url),
+                    &iri_or_literal_term(&service.endpoint_url),
                     graph,
                 )?;
                 if let Some(description) = &service.endpoint_description {
@@ -980,6 +1195,170 @@ pub mod oxigraph_backend {
                 }
             }
 
+            Ok(())
+        }
+
+        /// Write every triple for one harvested `policy` into `policy_node`.
+        /// See the module doc's "Triples emitted" section (policy resource
+        /// bullets) for the exact mapping.
+        fn write_policy(
+            &self,
+            policy: &Policy,
+            policy_node: &NamedNode,
+            index: usize,
+            graph: &NamedNode,
+        ) -> StoreResult<()> {
+            self.insert(
+                policy_node,
+                &rdf_type(),
+                &Term::from(odrl_policy_class(policy.kind)),
+                graph,
+            )?;
+            self.insert(
+                policy_node,
+                &sequence_index_pred(),
+                &Term::from(Literal::from(index as i64)),
+                graph,
+            )?;
+            if let Some(id) = &policy.id {
+                self.insert(
+                    policy_node,
+                    &policy_id_pred(),
+                    &Term::from(Literal::from(id.clone())),
+                    graph,
+                )?;
+            }
+            if let Some(assigner) = &policy.assigner {
+                self.insert(
+                    policy_node,
+                    &odrl_assigner_pred(),
+                    &iri_or_literal_term(assigner),
+                    graph,
+                )?;
+            }
+            if let Some(assignee) = &policy.assignee {
+                self.insert(
+                    policy_node,
+                    &odrl_assignee_pred(),
+                    &iri_or_literal_term(assignee),
+                    graph,
+                )?;
+            }
+
+            self.write_rules(
+                &policy.permissions,
+                policy_node,
+                &odrl_permission_pred(),
+                "permissions",
+                graph,
+            )?;
+            self.write_rules(
+                &policy.prohibitions,
+                policy_node,
+                &odrl_prohibition_pred(),
+                "prohibitions",
+                graph,
+            )?;
+            self.write_rules(
+                &policy.obligations,
+                policy_node,
+                &odrl_obligation_pred(),
+                "obligations",
+                graph,
+            )?;
+            Ok(())
+        }
+
+        /// Write one permission/prohibition/obligation list (`rules`) of
+        /// `policy_node`, linked via `predicate` and identified under
+        /// `segment` (see [`rule_iri`]).
+        fn write_rules(
+            &self,
+            rules: &[Rule],
+            policy_node: &NamedNode,
+            predicate: &NamedNode,
+            segment: &str,
+            graph: &NamedNode,
+        ) -> StoreResult<()> {
+            for (index, rule) in rules.iter().enumerate() {
+                let rule_node = rule_iri(policy_node.as_str(), segment, index);
+                self.insert(
+                    policy_node,
+                    predicate,
+                    &Term::from(rule_node.clone()),
+                    graph,
+                )?;
+                self.write_rule(rule, &rule_node, index, graph)?;
+            }
+            Ok(())
+        }
+
+        fn write_rule(
+            &self,
+            rule: &Rule,
+            rule_node: &NamedNode,
+            index: usize,
+            graph: &NamedNode,
+        ) -> StoreResult<()> {
+            self.insert(
+                rule_node,
+                &sequence_index_pred(),
+                &Term::from(Literal::from(index as i64)),
+                graph,
+            )?;
+            self.insert(
+                rule_node,
+                &odrl_action_pred(),
+                &iri_or_literal_term(&rule.action),
+                graph,
+            )?;
+            for (index, constraint) in rule.constraints.iter().enumerate() {
+                let constraint_node = constraint_iri(rule_node.as_str(), index);
+                self.insert(
+                    rule_node,
+                    &odrl_constraint_pred(),
+                    &Term::from(constraint_node.clone()),
+                    graph,
+                )?;
+                self.write_constraint(constraint, &constraint_node, index, graph)?;
+            }
+            Ok(())
+        }
+
+        /// `rightOperand` is always written as a plain literal, never
+        /// through [`iri_or_literal_term`] - see the module doc's "Triples
+        /// emitted" section (constraint resource bullets) for why.
+        fn write_constraint(
+            &self,
+            constraint: &Constraint,
+            constraint_node: &NamedNode,
+            index: usize,
+            graph: &NamedNode,
+        ) -> StoreResult<()> {
+            self.insert(
+                constraint_node,
+                &sequence_index_pred(),
+                &Term::from(Literal::from(index as i64)),
+                graph,
+            )?;
+            self.insert(
+                constraint_node,
+                &odrl_left_operand_pred(),
+                &iri_or_literal_term(&constraint.left_operand),
+                graph,
+            )?;
+            self.insert(
+                constraint_node,
+                &odrl_operator_pred(),
+                &iri_or_literal_term(&constraint.operator),
+                graph,
+            )?;
+            self.insert(
+                constraint_node,
+                &odrl_right_operand_pred(),
+                &Term::from(Literal::from(constraint.right_operand.clone())),
+                graph,
+            )?;
             Ok(())
         }
 
@@ -1093,7 +1472,24 @@ pub mod oxigraph_backend {
                 .map(|(_, distribution)| distribution)
                 .collect();
 
-            let reserved = [rdf_type(), sequence_index_pred(), distribution_pred];
+            let has_policy_pred = odrl_has_policy_pred();
+            let mut policy_entries = Vec::new();
+            for quad in self.quads(Some(subject), Some(&has_policy_pred), None, graph)? {
+                let policy_subject = expect_named_node(quad.object, "an odrl:hasPolicy reference")?;
+                policy_entries.push(self.load_policy(&policy_subject, graph)?);
+            }
+            policy_entries.sort_by_key(|(index, _)| *index);
+            let policies = policy_entries
+                .into_iter()
+                .map(|(_, policy)| policy)
+                .collect();
+
+            let reserved = [
+                rdf_type(),
+                sequence_index_pred(),
+                distribution_pred,
+                has_policy_pred,
+            ];
             let mut properties = BTreeMap::new();
             for quad in self.quads(Some(subject), None, None, graph)? {
                 if reserved.contains(&quad.predicate) {
@@ -1111,6 +1507,150 @@ pub mod oxigraph_backend {
                     id,
                     properties,
                     distributions,
+                    policies,
+                },
+            ))
+        }
+
+        fn load_policy(
+            &self,
+            subject: &NamedNode,
+            graph: &NamedNode,
+        ) -> StoreResult<(usize, Policy)> {
+            let index = self.sequence_index(subject, graph)?;
+            let kind_term = self
+                .first_object(subject, &rdf_type(), graph)?
+                .ok_or_else(|| {
+                    StoreError::Backend(format!("{} is missing rdf:type", subject.as_str()))
+                })?;
+            let kind_node = expect_named_node(kind_term, "a policy's rdf:type")?;
+            let kind = policy_kind_from_class(&kind_node)?;
+
+            let id = self
+                .first_object(subject, &policy_id_pred(), graph)?
+                .as_ref()
+                .map(term_as_string)
+                .transpose()?;
+            let assigner = self
+                .first_object(subject, &odrl_assigner_pred(), graph)?
+                .as_ref()
+                .map(term_as_string)
+                .transpose()?;
+            let assignee = self
+                .first_object(subject, &odrl_assignee_pred(), graph)?
+                .as_ref()
+                .map(term_as_string)
+                .transpose()?;
+
+            let permissions = self.load_rules(subject, &odrl_permission_pred(), graph)?;
+            let prohibitions = self.load_rules(subject, &odrl_prohibition_pred(), graph)?;
+            let obligations = self.load_rules(subject, &odrl_obligation_pred(), graph)?;
+
+            Ok((
+                index,
+                Policy {
+                    id,
+                    kind,
+                    assigner,
+                    assignee,
+                    permissions,
+                    prohibitions,
+                    obligations,
+                },
+            ))
+        }
+
+        /// Every rule (permission/prohibition/obligation, depending on
+        /// `predicate`) attached to `policy_subject`, sorted by
+        /// `fcns:sequenceIndex`.
+        fn load_rules(
+            &self,
+            policy_subject: &NamedNode,
+            predicate: &NamedNode,
+            graph: &NamedNode,
+        ) -> StoreResult<Vec<Rule>> {
+            let mut entries = Vec::new();
+            for quad in self.quads(Some(policy_subject), Some(predicate), None, graph)? {
+                let rule_subject = expect_named_node(quad.object, "an odrl rule reference")?;
+                entries.push(self.load_rule(&rule_subject, graph)?);
+            }
+            entries.sort_by_key(|(index, _)| *index);
+            Ok(entries.into_iter().map(|(_, rule)| rule).collect())
+        }
+
+        fn load_rule(&self, subject: &NamedNode, graph: &NamedNode) -> StoreResult<(usize, Rule)> {
+            let index = self.sequence_index(subject, graph)?;
+            let action = self
+                .first_object(subject, &odrl_action_pred(), graph)?
+                .as_ref()
+                .map(term_as_string)
+                .transpose()?
+                .ok_or_else(|| {
+                    StoreError::Backend(format!("{} is missing odrl:action", subject.as_str()))
+                })?;
+
+            let constraint_pred = odrl_constraint_pred();
+            let mut constraint_entries = Vec::new();
+            for quad in self.quads(Some(subject), Some(&constraint_pred), None, graph)? {
+                let constraint_subject =
+                    expect_named_node(quad.object, "an odrl:constraint reference")?;
+                constraint_entries.push(self.load_constraint(&constraint_subject, graph)?);
+            }
+            constraint_entries.sort_by_key(|(index, _)| *index);
+            let constraints = constraint_entries
+                .into_iter()
+                .map(|(_, constraint)| constraint)
+                .collect();
+
+            Ok((
+                index,
+                Rule {
+                    action,
+                    constraints,
+                },
+            ))
+        }
+
+        fn load_constraint(
+            &self,
+            subject: &NamedNode,
+            graph: &NamedNode,
+        ) -> StoreResult<(usize, Constraint)> {
+            let index = self.sequence_index(subject, graph)?;
+            let left_operand = self
+                .first_object(subject, &odrl_left_operand_pred(), graph)?
+                .as_ref()
+                .map(term_as_string)
+                .transpose()?
+                .ok_or_else(|| {
+                    StoreError::Backend(format!("{} is missing odrl:leftOperand", subject.as_str()))
+                })?;
+            let operator = self
+                .first_object(subject, &odrl_operator_pred(), graph)?
+                .as_ref()
+                .map(term_as_string)
+                .transpose()?
+                .ok_or_else(|| {
+                    StoreError::Backend(format!("{} is missing odrl:operator", subject.as_str()))
+                })?;
+            let right_operand = self
+                .first_object(subject, &odrl_right_operand_pred(), graph)?
+                .as_ref()
+                .map(term_as_string)
+                .transpose()?
+                .ok_or_else(|| {
+                    StoreError::Backend(format!(
+                        "{} is missing odrl:rightOperand",
+                        subject.as_str()
+                    ))
+                })?;
+
+            Ok((
+                index,
+                Constraint {
+                    left_operand,
+                    operator,
+                    right_operand,
                 },
             ))
         }
@@ -1376,9 +1916,13 @@ pub mod oxigraph_backend {
         }
 
         /// A catalog exercising every field the domain model has: nested
-        /// datasets with properties and distributions, a data service, a
-        /// participant id, and catalog-level properties. Used by the
-        /// round-trip and real-decomposition tests below.
+        /// datasets with properties, distributions, and a policy, a data
+        /// service, a participant id, and catalog-level properties. Used by
+        /// the round-trip and real-decomposition tests below. A more
+        /// elaborate, ordering-focused policy fixture lives separately in
+        /// `policy_catalog` below - kept out of this shared fixture so it
+        /// doesn't perturb the quad-count/predicate assertions the other
+        /// tests below make against `rich_catalog`.
         fn rich_catalog() -> Catalog {
             let mut catalog = Catalog::new("cat-rich", NodeId::new("node-rich"));
             catalog.participant_id = Some("did:example:rich-participant".to_string());
@@ -1405,6 +1949,18 @@ pub mod oxigraph_backend {
                         access_service: "svc-1".to_string(),
                     },
                 ],
+                policies: vec![Policy {
+                    id: None,
+                    kind: PolicyKind::Set,
+                    assigner: None,
+                    assignee: None,
+                    permissions: vec![Rule {
+                        action: "use".to_string(),
+                        constraints: Vec::new(),
+                    }],
+                    prohibitions: Vec::new(),
+                    obligations: Vec::new(),
+                }],
             });
             catalog.datasets.push(Dataset {
                 id: "ds-2".to_string(),
@@ -1413,6 +1969,7 @@ pub mod oxigraph_backend {
                     format: "text/csv".to_string(),
                     access_service: "svc-2".to_string(),
                 }],
+                policies: Vec::new(),
             });
 
             catalog.data_services.push(DataService {
@@ -1521,11 +2078,16 @@ pub mod oxigraph_backend {
             assert!(!removed_again);
         }
 
-        /// The correctness bar from gap analysis §3.2: round-tripping a
-        /// catalog that exercises every field (nested datasets, properties
-        /// with both an already-IRI key and a plain key, distributions,
-        /// data services, participant id) through real triples must
-        /// reproduce the exact same domain value, order included.
+        /// The correctness bar from gap analysis §3.2 (extended by §3.4):
+        /// round-tripping a catalog that exercises every field (nested
+        /// datasets, properties with both an already-IRI key and a plain
+        /// key, distributions, a harvested policy, data services,
+        /// participant id) through real triples must reproduce the exact
+        /// same domain value, order included. `ds-2` deliberately carries
+        /// no policy at all - regression coverage that a dataset predating
+        /// this feature (or one whose participant just advertised none)
+        /// still round-trips its `policies` field to an empty `Vec`, not
+        /// an error or `None`.
         #[tokio::test]
         async fn round_trips_a_catalog_exercising_every_field_exactly() {
             let cache = cache();
@@ -1538,6 +2100,168 @@ pub mod oxigraph_backend {
                 .unwrap();
             assert_eq!(results.len(), 1);
             assert_eq!(results[0], original);
+            assert!(
+                results[0].datasets[1].policies.is_empty(),
+                "ds-2 carries no policy and must round-trip to an empty Vec"
+            );
+        }
+
+        /// A more elaborate policy than `rich_catalog`'s: two permissions
+        /// (proving `Policy.permissions`' `Vec` order survives an unordered
+        /// triple store, not just its presence), the first with two
+        /// constraints (same proof for `Rule.constraints`), a prohibition
+        /// with no constraints, no obligations, an explicit `Offer` kind
+        /// (not the `Set` default), an id, an assigner, and an assignee -
+        /// covering every `Policy`/`Rule`/`Constraint` field at least once.
+        fn policy_catalog() -> Catalog {
+            let mut catalog = Catalog::new("cat-policy", NodeId::new("node-policy"));
+            catalog.datasets.push(Dataset {
+                id: "ds-policy".to_string(),
+                properties: BTreeMap::new(),
+                distributions: Vec::new(),
+                policies: vec![Policy {
+                    id: Some("policy-1".to_string()),
+                    kind: PolicyKind::Offer,
+                    assigner: Some("did:example:assigner".to_string()),
+                    assignee: Some("did:example:assignee".to_string()),
+                    permissions: vec![
+                        Rule {
+                            action: "use".to_string(),
+                            constraints: vec![
+                                Constraint {
+                                    left_operand: "dateTime".to_string(),
+                                    operator: "lteq".to_string(),
+                                    right_operand: "2027-01-01T00:00:00Z".to_string(),
+                                },
+                                Constraint {
+                                    left_operand: "count".to_string(),
+                                    operator: "lteq".to_string(),
+                                    right_operand: "100".to_string(),
+                                },
+                            ],
+                        },
+                        Rule {
+                            action: "distribute".to_string(),
+                            constraints: Vec::new(),
+                        },
+                    ],
+                    prohibitions: vec![Rule {
+                        action: "modify".to_string(),
+                        constraints: Vec::new(),
+                    }],
+                    obligations: Vec::new(),
+                }],
+            });
+            catalog
+        }
+
+        #[tokio::test]
+        async fn round_trips_a_dataset_policy_with_full_shape_and_preserves_ordering() {
+            let cache = cache();
+            let original = policy_catalog();
+            cache.upsert(original.clone()).await.unwrap();
+
+            let results = cache
+                .query(CatalogQuery::for_node(NodeId::new("node-policy")))
+                .await
+                .unwrap();
+            assert_eq!(results.len(), 1);
+            // Exhaustive: `Vec`'s `PartialEq` is order-sensitive, so this
+            // alone already proves permission/constraint order survived.
+            assert_eq!(results[0], original);
+
+            // Spelled out explicitly too, so the ordering claim is legible
+            // without cross-referencing `policy_catalog` above.
+            let policy = &results[0].datasets[0].policies[0];
+            assert_eq!(policy.permissions[0].action, "use");
+            assert_eq!(
+                policy.permissions[0].constraints[0].left_operand,
+                "dateTime"
+            );
+            assert_eq!(policy.permissions[0].constraints[1].left_operand, "count");
+            assert_eq!(policy.permissions[1].action, "distribute");
+            assert!(policy.permissions[1].constraints.is_empty());
+            assert_eq!(policy.prohibitions.len(), 1);
+            assert!(policy.prohibitions[0].constraints.is_empty());
+            assert!(policy.obligations.is_empty());
+            assert_eq!(policy.kind, PolicyKind::Offer);
+            assert_eq!(policy.id.as_deref(), Some("policy-1"));
+            assert_eq!(policy.assigner.as_deref(), Some("did:example:assigner"));
+            assert_eq!(policy.assignee.as_deref(), Some("did:example:assignee"));
+        }
+
+        /// Regression coverage for every dataset that predates this
+        /// feature (or whose participant simply advertised no policy at
+        /// all): `Dataset.policies` must round-trip to an empty `Vec`, not
+        /// an error, and no stray `odrl:hasPolicy` triple should exist for
+        /// it.
+        #[tokio::test]
+        async fn dataset_with_no_policies_round_trips_to_an_empty_vec() {
+            let cache = cache();
+            let mut catalog = Catalog::new("cat-no-policy", NodeId::new("node-no-policy"));
+            catalog.datasets.push(Dataset {
+                id: "ds-1".to_string(),
+                properties: BTreeMap::new(),
+                distributions: Vec::new(),
+                policies: Vec::new(),
+            });
+            cache.upsert(catalog.clone()).await.unwrap();
+
+            let results = cache
+                .query(CatalogQuery::for_node(NodeId::new("node-no-policy")))
+                .await
+                .unwrap();
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0], catalog);
+            assert!(results[0].datasets[0].policies.is_empty());
+
+            let graph = node_iri(&NodeId::new("node-no-policy"));
+            let policy_links = cache
+                .quads(None, Some(&odrl_has_policy_pred()), None, &graph)
+                .unwrap();
+            assert!(policy_links.is_empty());
+        }
+
+        /// Proves real ODRL decomposition happened, the same way
+        /// `a_direct_quad_pattern_query_finds_a_distribution_format_by_its_real_dcat_predicate`
+        /// proves it for DCAT: a direct quad-pattern query using the real
+        /// `odrl:hasPolicy`/`rdf:type` predicates finds the policy this
+        /// store wrote, reachable from the dataset by a genuine ODRL link,
+        /// not just present somewhere in the graph.
+        #[tokio::test]
+        async fn a_direct_quad_pattern_query_finds_a_policy_by_its_real_odrl_predicates() {
+            let cache = cache();
+            cache.upsert(policy_catalog()).await.unwrap();
+
+            let graph = node_iri(&NodeId::new("node-policy"));
+            let dataset_subject = dataset_iri(&node_base(&NodeId::new("node-policy")), "ds-policy");
+            let policy_links = cache
+                .quads(
+                    Some(&dataset_subject),
+                    Some(&odrl_has_policy_pred()),
+                    None,
+                    &graph,
+                )
+                .unwrap();
+            assert_eq!(policy_links.len(), 1);
+
+            let policy_subject = match &policy_links[0].object {
+                Term::NamedNode(node) => node.clone(),
+                other => panic!("expected a named node object, got {other:?}"),
+            };
+            let type_matches = cache
+                .quads(
+                    Some(&policy_subject),
+                    Some(&rdf_type()),
+                    Some(&Term::from(odrl_policy_class(PolicyKind::Offer))),
+                    &graph,
+                )
+                .unwrap();
+            assert_eq!(
+                type_matches.len(),
+                1,
+                "expected the harvested policy to carry a real odrl:Offer rdf:type"
+            );
         }
 
         /// Proves real decomposition happened: a direct quad-pattern query
@@ -1645,6 +2369,7 @@ pub mod oxigraph_backend {
                 id: "only-dataset".to_string(),
                 properties: BTreeMap::new(),
                 distributions: vec![],
+                policies: Vec::new(),
             });
             cache.upsert(smaller.clone()).await.unwrap();
 

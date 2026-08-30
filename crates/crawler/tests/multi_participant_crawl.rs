@@ -179,6 +179,7 @@ fn dataset(id: &str) -> Dataset {
         id: id.to_string(),
         properties: Default::default(),
         distributions: Vec::new(),
+        policies: Vec::new(),
     }
 }
 

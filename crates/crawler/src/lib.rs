@@ -26,7 +26,9 @@ pub use config::{
 use std::sync::Arc;
 use std::time::Duration;
 
-use catalog_core::{Catalog, DataService, Dataset, Distribution, NodeId};
+use catalog_core::{
+    Catalog, Constraint, DataService, Dataset, Distribution, NodeId, Policy, PolicyKind, Rule,
+};
 use dcp_core::HolderIdentity;
 use rdf_store::CatalogCache;
 use serde_json::Value;
@@ -229,6 +231,29 @@ async fn crawl_one(
 /// `Dataset.properties` bag under those exact keys when present, and simply
 /// left absent from it when not. See `collect_datasets_and_services`.
 ///
+/// A dataset object's `odrl:hasPolicy` entries (compact key `hasPolicy` or
+/// the expanded IRI key real EDC/DSP JSON-LD uses,
+/// `http://www.w3.org/ns/odrl/2/hasPolicy`) are parsed into
+/// `Dataset.policies: Vec<catalog_core::Policy>` - real harvested policy
+/// data, not the placeholder the now-removed http-api DSP layer used to
+/// emit (gap analysis §3.4). `hasPolicy` may be a single JSON-LD object or
+/// an array of them (ODRL/JSON-LD's "one-or-many" convention); each
+/// `permission`/`prohibition`/`obligation` under a policy follows the same
+/// convention. See `parse_policies` for the field-by-field mapping.
+///
+/// **Known limitation** (deliberate, gap analysis §3.4 scope cut): only
+/// *atomic* ODRL constraints (`leftOperand`/`operator`/`rightOperand`) are
+/// modeled. A constraint that is instead a *logical* group
+/// (`odrl:and`/`odrl:or`/`odrl:andSequence`/`odrl:xone` nesting further
+/// constraints) does not have a flat `leftOperand`, so it is recognized as
+/// malformed for this parser's purposes and skipped - only that one
+/// constraint entry, never the enclosing rule or policy - with a
+/// `tracing::warn!` marking the skip rather than silently dropping it. A
+/// rule (`permission`/`prohibition`/`obligation`) missing its required
+/// `action` is skipped the same way, one entry at a time, so one malformed
+/// entry from a crawled participant degrades gracefully instead of taking
+/// down the whole crawl cycle.
+///
 /// Also tolerates a "federation of federations" response - one where the
 /// crawled participant is itself a multi-participant aggregator (e.g.
 /// another instance of this workspace's own `ds-catalog-broker-rs`, once it has 2+
@@ -295,6 +320,7 @@ fn collect_datasets_and_services(value: &Value, catalog: &mut Catalog) {
                 id: dataset_id.to_string(),
                 properties: Default::default(),
                 distributions: Vec::new(),
+                policies: parse_policies(dataset_value),
             };
 
             // Optional descriptive fields, folded verbatim into the
@@ -389,6 +415,158 @@ fn parse_data_service(value: &Value) -> Option<DataService> {
         endpoint_url,
         endpoint_description,
     })
+}
+
+/// The expanded-IRI form of `odrl:hasPolicy` real EDC/DSP JSON-LD uses in
+/// place of the compact `hasPolicy` key - matches
+/// `edc_federated_catalog_client::models::Dataset::has_policy`'s own
+/// `#[serde(rename = "http://www.w3.org/ns/odrl/2/hasPolicy")]` on the wire
+/// side (see this crate's task briefing / gap analysis §3.4).
+const ODRL_HAS_POLICY_IRI: &str = "http://www.w3.org/ns/odrl/2/hasPolicy";
+
+/// ODRL/JSON-LD's "one-or-many" convention: a value that is normally an
+/// array may legally appear as a single bare object instead when there is
+/// exactly one entry. Returns an empty `Vec` for a missing key, the single
+/// value wrapped for a bare object, or the array's own entries otherwise.
+fn one_or_many(value: Option<&Value>) -> Vec<&Value> {
+    match value {
+        None => Vec::new(),
+        Some(Value::Array(items)) => items.iter().collect(),
+        Some(other) => vec![other],
+    }
+}
+
+/// Read a string field that may appear under `plain` (this workspace's own
+/// compact DSP shape) or under `alias` (real EDC/DSP's `odrl:`-prefixed
+/// JSON-LD key) - e.g. `assigner`/`odrl:assigner`.
+fn get_str_with_alias(value: &Value, plain: &str, alias: &str) -> Option<String> {
+    value
+        .get(plain)
+        .or_else(|| value.get(alias))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// Parse a dataset object's `hasPolicy` entries (see `parse_catalog_response`'s
+/// doc comment for the accepted key forms and the "one-or-many" shape) into
+/// `catalog_core::Policy` values. Absent entirely -> an empty `Vec`, exactly
+/// like every other optional dataset descriptor this crawler handles.
+fn parse_policies(dataset_value: &Value) -> Vec<Policy> {
+    let has_policy = dataset_value
+        .get("hasPolicy")
+        .or_else(|| dataset_value.get(ODRL_HAS_POLICY_IRI));
+
+    one_or_many(has_policy)
+        .into_iter()
+        .filter(|entry| entry.is_object())
+        .map(parse_policy)
+        .collect()
+}
+
+/// Parse one `hasPolicy` entry into a `Policy`. Every field is optional
+/// (matching `catalog_core::Policy`'s own `#[serde(default)]` shape): a
+/// missing `@id` leaves `Policy::id` `None`, and an unrecognized or absent
+/// `@type` leniently falls back to `PolicyKind::default()` (`Set`) rather
+/// than failing this policy or the enclosing dataset - a crawled
+/// participant advertising an ODRL vocabulary term this crate doesn't
+/// recognize must not take down harvesting over it.
+fn parse_policy(value: &Value) -> Policy {
+    let id = value.get("@id").and_then(Value::as_str).map(str::to_string);
+    let kind = value
+        .get("@type")
+        .and_then(Value::as_str)
+        .map(|type_str| match type_str {
+            "Set" => PolicyKind::Set,
+            "Offer" => PolicyKind::Offer,
+            "Agreement" => PolicyKind::Agreement,
+            _ => PolicyKind::default(),
+        })
+        .unwrap_or_default();
+    let assigner = get_str_with_alias(value, "assigner", "odrl:assigner");
+    let assignee = get_str_with_alias(value, "assignee", "odrl:assignee");
+
+    Policy {
+        id,
+        kind,
+        assigner,
+        assignee,
+        permissions: parse_rules(value, "permission"),
+        prohibitions: parse_rules(value, "prohibition"),
+        obligations: parse_rules(value, "obligation"),
+    }
+}
+
+/// Parse a policy object's `key` entries (`"permission"`, `"prohibition"`,
+/// or `"obligation"`, one-or-many) into `Rule`s. A malformed entry -
+/// missing its required `action` - is skipped on its own, with a
+/// `tracing::warn!`, rather than failing the rest of the list; see
+/// `parse_catalog_response`'s doc comment for why.
+fn parse_rules(policy_value: &Value, key: &str) -> Vec<Rule> {
+    one_or_many(policy_value.get(key))
+        .into_iter()
+        .filter_map(parse_rule)
+        .collect()
+}
+
+/// Parse one `permission`/`prohibition`/`obligation` entry into a `Rule`.
+/// Returns `None` (skipping just this entry) when `action` is missing -
+/// required by ODRL's rule shape and by
+/// `edc_connector_client_next::types::policy`'s wire model, which has no
+/// `#[serde(default)]` on it either.
+fn parse_rule(value: &Value) -> Option<Rule> {
+    let action = get_str_with_alias(value, "action", "odrl:action").or_else(|| {
+        tracing::warn!(
+            entry = %value,
+            "skipping a crawled ODRL permission/prohibition/obligation entry with no 'action'"
+        );
+        None
+    })?;
+
+    Some(Rule {
+        action,
+        constraints: parse_constraints(value.get("constraint")),
+    })
+}
+
+/// Parse a rule's `constraint` entries (one-or-many) into `Constraint`s.
+/// See `parse_catalog_response`'s doc comment: only atomic constraints are
+/// modeled, so a nested logical-group entry (no flat `leftOperand`) is
+/// recognized as malformed for this parser and skipped with a
+/// `tracing::warn!`, without dropping the rule's other constraints.
+fn parse_constraints(value: Option<&Value>) -> Vec<Constraint> {
+    one_or_many(value)
+        .into_iter()
+        .filter_map(parse_constraint)
+        .collect()
+}
+
+/// Parse one `constraint` entry into an atomic `Constraint`. Returns `None`
+/// (skipping just this entry, logged via `tracing::warn!`) when any of
+/// `leftOperand`/`operator`/`rightOperand` is missing - which is exactly
+/// what happens for a nested `odrl:and`/`odrl:or`/`odrl:xone` logical-group
+/// node, since it carries no flat `leftOperand` of its own. See the "Known
+/// limitation" paragraph on `parse_catalog_response` and gap analysis §3.4.
+fn parse_constraint(value: &Value) -> Option<Constraint> {
+    let left_operand = get_str_with_alias(value, "leftOperand", "odrl:leftOperand");
+    let operator = get_str_with_alias(value, "operator", "odrl:operator");
+    let right_operand = get_str_with_alias(value, "rightOperand", "odrl:rightOperand");
+
+    match (left_operand, operator, right_operand) {
+        (Some(left_operand), Some(operator), Some(right_operand)) => Some(Constraint {
+            left_operand,
+            operator,
+            right_operand,
+        }),
+        _ => {
+            tracing::warn!(
+                entry = %value,
+                "skipping a crawled ODRL constraint that is not an atomic leftOperand/operator/rightOperand \
+                 triple - nested logical-group constraints (odrl:and/or/xone) are out of scope, see gap \
+                 analysis §3.4"
+            );
+            None
+        }
+    }
 }
 
 /// Spawn a background task that runs [`crawl_once`] every
@@ -738,6 +916,224 @@ mod tests {
                 props.get(key)
             );
         }
+    }
+
+    /// (a) A dataset with no `hasPolicy` key at all parses to an empty
+    /// `policies` Vec - never a fabricated default, exactly like every
+    /// other optional descriptor this function handles.
+    #[test]
+    fn dataset_without_has_policy_leaves_policies_empty() {
+        let body = json!({
+            "@id": "cat-1",
+            "dataset": [{
+                "@id": "DATASET-A",
+                "distribution": [{"format": "application/json", "accessService": "svc-1"}]
+            }],
+            "service": [{"@id": "svc-1", "endpointURL": "https://example.org/dsp"}]
+        });
+        let participant = participant("no-policy-participant");
+        let catalog = parse_catalog_response(&body, &participant);
+
+        assert_eq!(catalog.datasets.len(), 1);
+        assert!(catalog.datasets[0].policies.is_empty());
+    }
+
+    /// (b) A realistic policy - one `permission` (action + one constraint)
+    /// and one `prohibition` (action only, no constraint) - parses to the
+    /// exact expected `Policy`/`Rule`/`Constraint` values, including
+    /// `@id`, `@type`, and the `odrl:assigner`/`odrl:assignee` aliases.
+    #[test]
+    fn dataset_has_policy_with_permission_and_prohibition_parses_exact_values() {
+        let body = json!({
+            "@id": "cat-1",
+            "dataset": [{
+                "@id": "DATASET-A",
+                "hasPolicy": [{
+                    "@id": "offer-1",
+                    "@type": "Offer",
+                    "odrl:assigner": "did:example:provider",
+                    "odrl:assignee": "did:example:consumer",
+                    "permission": [{
+                        "action": "use",
+                        "constraint": [{
+                            "leftOperand": "dateTime",
+                            "operator": "lteq",
+                            "rightOperand": "2027-01-01T00:00:00Z"
+                        }]
+                    }],
+                    "prohibition": [{"action": "distribute"}]
+                }],
+                "distribution": [{"format": "application/json", "accessService": "svc-1"}]
+            }],
+            "service": [{"@id": "svc-1", "endpointURL": "https://example.org/dsp"}]
+        });
+        let participant = participant("policy-participant");
+        let catalog = parse_catalog_response(&body, &participant);
+
+        assert_eq!(catalog.datasets.len(), 1);
+        let policies = &catalog.datasets[0].policies;
+        assert_eq!(policies.len(), 1);
+        let policy = &policies[0];
+        assert_eq!(policy.id.as_deref(), Some("offer-1"));
+        assert_eq!(policy.kind, PolicyKind::Offer);
+        assert_eq!(policy.assigner.as_deref(), Some("did:example:provider"));
+        assert_eq!(policy.assignee.as_deref(), Some("did:example:consumer"));
+
+        assert_eq!(policy.permissions.len(), 1);
+        assert_eq!(policy.permissions[0].action, "use");
+        assert_eq!(
+            policy.permissions[0].constraints,
+            vec![Constraint {
+                left_operand: "dateTime".to_string(),
+                operator: "lteq".to_string(),
+                right_operand: "2027-01-01T00:00:00Z".to_string(),
+            }]
+        );
+
+        assert_eq!(policy.prohibitions.len(), 1);
+        assert_eq!(policy.prohibitions[0].action, "distribute");
+        assert!(policy.prohibitions[0].constraints.is_empty());
+
+        assert!(policy.obligations.is_empty());
+    }
+
+    /// (c) `hasPolicy` given as a single JSON object (not wrapped in an
+    /// array) still parses correctly - ODRL/JSON-LD's "one-or-many"
+    /// convention. Also exercises the real EDC/DSP expanded-IRI key
+    /// `http://www.w3.org/ns/odrl/2/hasPolicy` instead of the compact
+    /// `hasPolicy` alias.
+    #[test]
+    fn dataset_has_policy_as_a_single_object_via_expanded_iri_key_parses() {
+        let body = json!({
+            "@id": "cat-1",
+            "dataset": [{
+                "@id": "DATASET-A",
+                "http://www.w3.org/ns/odrl/2/hasPolicy": {
+                    "@type": "Set",
+                    "permission": {"action": "use"}
+                },
+                "distribution": [{"format": "application/json", "accessService": "svc-1"}]
+            }],
+            "service": [{"@id": "svc-1", "endpointURL": "https://example.org/dsp"}]
+        });
+        let participant = participant("expanded-iri-participant");
+        let catalog = parse_catalog_response(&body, &participant);
+
+        assert_eq!(catalog.datasets.len(), 1);
+        let policies = &catalog.datasets[0].policies;
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0].kind, PolicyKind::Set);
+        assert_eq!(policies[0].permissions.len(), 1);
+        assert_eq!(policies[0].permissions[0].action, "use");
+    }
+
+    /// (d) A permission carrying one well-formed atomic constraint
+    /// alongside one malformed/nested one (an `odrl:and` logical-group
+    /// node, out of scope per gap analysis §3.4) skips only the malformed
+    /// constraint - the well-formed constraint and the rest of the
+    /// permission/policy survive intact, and the whole crawl does not
+    /// panic.
+    #[test]
+    fn malformed_nested_constraint_is_skipped_without_dropping_the_rest_of_the_policy() {
+        let body = json!({
+            "@id": "cat-1",
+            "dataset": [{
+                "@id": "DATASET-A",
+                "hasPolicy": [{
+                    "@type": "Offer",
+                    "permission": [{
+                        "action": "use",
+                        "constraint": [
+                            {
+                                "leftOperand": "count",
+                                "operator": "lteq",
+                                "rightOperand": "10"
+                            },
+                            {
+                                "odrl:and": [
+                                    {"leftOperand": "dateTime", "operator": "gt", "rightOperand": "2026-01-01"},
+                                    {"leftOperand": "dateTime", "operator": "lt", "rightOperand": "2027-01-01"}
+                                ]
+                            }
+                        ]
+                    }]
+                }],
+                "distribution": [{"format": "application/json", "accessService": "svc-1"}]
+            }],
+            "service": [{"@id": "svc-1", "endpointURL": "https://example.org/dsp"}]
+        });
+        let participant = participant("nested-constraint-participant");
+        let catalog = parse_catalog_response(&body, &participant);
+
+        assert_eq!(catalog.datasets.len(), 1);
+        let policies = &catalog.datasets[0].policies;
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0].permissions.len(), 1);
+        assert_eq!(
+            policies[0].permissions[0].constraints,
+            vec![Constraint {
+                left_operand: "count".to_string(),
+                operator: "lteq".to_string(),
+                right_operand: "10".to_string(),
+            }],
+            "the well-formed atomic constraint must survive; the nested odrl:and group must be skipped, not crash or wipe the whole list"
+        );
+    }
+
+    /// A `permission`/`prohibition`/`obligation` entry missing its
+    /// required `action` is skipped as a single malformed rule entry,
+    /// without failing the rest of the policy - a crawled participant
+    /// sending malformed data degrades gracefully rather than taking down
+    /// harvesting.
+    #[test]
+    fn rule_entry_missing_action_is_skipped_without_dropping_other_rules() {
+        let body = json!({
+            "@id": "cat-1",
+            "dataset": [{
+                "@id": "DATASET-A",
+                "hasPolicy": [{
+                    "@type": "Offer",
+                    "permission": [
+                        {"constraint": [{"leftOperand": "count", "operator": "lteq", "rightOperand": "10"}]},
+                        {"action": "use"}
+                    ]
+                }],
+                "distribution": [{"format": "application/json", "accessService": "svc-1"}]
+            }],
+            "service": [{"@id": "svc-1", "endpointURL": "https://example.org/dsp"}]
+        });
+        let participant = participant("missing-action-participant");
+        let catalog = parse_catalog_response(&body, &participant);
+
+        let policies = &catalog.datasets[0].policies;
+        assert_eq!(policies.len(), 1);
+        assert_eq!(
+            policies[0].permissions.len(),
+            1,
+            "the actionless permission entry must be dropped, the valid one kept"
+        );
+        assert_eq!(policies[0].permissions[0].action, "use");
+    }
+
+    /// An unrecognized `@type` value degrades leniently to the default
+    /// `PolicyKind` (`Set`) rather than failing the whole dataset.
+    #[test]
+    fn unrecognized_policy_type_falls_back_to_default_kind() {
+        let body = json!({
+            "@id": "cat-1",
+            "dataset": [{
+                "@id": "DATASET-A",
+                "hasPolicy": [{"@type": "SomethingUnknown", "permission": [{"action": "use"}]}],
+                "distribution": [{"format": "application/json", "accessService": "svc-1"}]
+            }],
+            "service": [{"@id": "svc-1", "endpointURL": "https://example.org/dsp"}]
+        });
+        let participant = participant("unknown-type-participant");
+        let catalog = parse_catalog_response(&body, &participant);
+
+        let policies = &catalog.datasets[0].policies;
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0].kind, PolicyKind::Set);
     }
 
     #[tokio::test]

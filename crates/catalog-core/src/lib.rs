@@ -76,12 +76,103 @@ pub struct DataService {
     pub endpoint_description: Option<String>,
 }
 
-/// One offered dataset: its id, arbitrary properties, and the
-/// distributions it's available through.
+/// The ODRL `@type` of a [`Policy`]: how binding it currently is.
 ///
-/// EDC's `Dataset` also carries `offers: Map<String, Policy>`; policy
-/// modeling is out of scope for this skeleton and will be added once a
-/// consuming crate needs it.
+/// Mirrors ODRL's three policy subclasses (<https://www.w3.org/TR/odrl-model/#policy>).
+/// A catalog broker only ever *harvests* policies attached to a crawled
+/// participant's `dcat:Dataset` via `odrl:hasPolicy` - it never negotiates,
+/// so in practice every policy this crate constructs from a crawl is an
+/// `Offer` (the pre-negotiation ODRL type DSP catalogs advertise). `Set` and
+/// `Agreement` are modeled anyway because they are valid ODRL policy types
+/// and a faithful cache must not reject or coerce a participant that (contrary
+/// to typical DSP usage) advertises one of the other two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PolicyKind {
+    #[default]
+    Set,
+    Offer,
+    Agreement,
+}
+
+/// One atomic ODRL constraint: `leftOperand operator rightOperand`, e.g.
+/// `odrl:dateTime lteq "2027-01-01T00:00:00Z"`.
+///
+/// This models only *atomic* constraints
+/// (<https://www.w3.org/TR/odrl-model/#constraint-atomic>). ODRL also allows
+/// *logical constraints* - `odrl:and` / `odrl:or` / `odrl:andSequence` /
+/// `odrl:xone` groups nesting further constraints
+/// (<https://www.w3.org/TR/odrl-model/#constraint-logical>) - and those are
+/// **not modeled here**. This is a deliberate, known scope cut for the
+/// gap-analysis §3.4 work, not an oversight: a crawled constraint that turns
+/// out to be a logical-group node rather than an atomic
+/// leftOperand/operator/rightOperand triple is skipped (that one constraint
+/// only, not the enclosing policy or rule) by the crawler/rdf-store parsing
+/// path, with the skip surfaced as a tracing warning rather than silently
+/// dropped - see the "Known limitation" notes in `crawler::parse_catalog_response`
+/// and `rdf_store`'s module doc for where that happens.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Constraint {
+    pub left_operand: String,
+    pub operator: String,
+    pub right_operand: String,
+}
+
+/// One ODRL rule entry: a single `permission`, `prohibition`, or
+/// `obligation` inside a [`Policy`].
+///
+/// ODRL gives permission/prohibition/obligation the same shape (an `action`
+/// plus zero or more `constraint`s
+/// (<https://www.w3.org/TR/odrl-model/#rule>)), so one type covers all
+/// three; which list a given `Rule` lives in (see [`Policy::permissions`],
+/// [`Policy::prohibitions`], [`Policy::obligations`]) is what distinguishes
+/// them, exactly as in the ODRL JSON-LD serialization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rule {
+    pub action: String,
+    #[serde(default)]
+    pub constraints: Vec<Constraint>,
+}
+
+/// A harvested ODRL policy, as faithfully preserved from a crawled
+/// participant's `dcat:Dataset` / `odrl:hasPolicy` triples.
+///
+/// This is real policy data derived from what a crawled participant
+/// actually advertised - not the hardcoded placeholder the now-removed
+/// http-api DSP layer used to emit (see gap analysis §3.4). A read-only
+/// catalog broker has no negotiation capability of its own, so "honoring"
+/// a harvested policy here means: preserve it faithfully end to end
+/// (crawl -> semantic cache -> management API), and make it available to
+/// callers rather than inventing or dropping it. Whether the broker should
+/// also *filter* what it re-serves based on policy content (e.g. hide a
+/// dataset from a caller not entitled under its policy) is an open design
+/// question this type intentionally does not answer - see gap analysis
+/// §3.4 for why that's flagged rather than guessed at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Policy {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub kind: PolicyKind,
+    #[serde(default)]
+    pub assigner: Option<String>,
+    #[serde(default)]
+    pub assignee: Option<String>,
+    #[serde(default)]
+    pub permissions: Vec<Rule>,
+    #[serde(default)]
+    pub prohibitions: Vec<Rule>,
+    #[serde(default)]
+    pub obligations: Vec<Rule>,
+}
+
+/// One offered dataset: its id, arbitrary properties, the distributions
+/// it's available through, and the ODRL policies a crawled participant
+/// attached to it.
+///
+/// EDC's `Dataset` carries `offers: Map<String, Policy>`; the equivalent
+/// here is `policies`, harvested faithfully from a crawled participant's
+/// `odrl:hasPolicy` triples rather than invented - see [`Policy`]'s doc
+/// comment and gap analysis §3.4.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Dataset {
     pub id: String,
@@ -89,6 +180,8 @@ pub struct Dataset {
     pub properties: BTreeMap<String, String>,
     #[serde(default)]
     pub distributions: Vec<Distribution>,
+    #[serde(default)]
+    pub policies: Vec<Policy>,
 }
 
 /// A crawled catalog: one participant's advertised datasets and data
@@ -154,5 +247,94 @@ mod tests {
     fn node_id_display_matches_inner_string() {
         let id = NodeId::new("abc");
         assert_eq!(id.to_string(), "abc");
+    }
+
+    #[test]
+    fn policy_kind_defaults_to_set() {
+        assert_eq!(PolicyKind::default(), PolicyKind::Set);
+    }
+
+    #[test]
+    fn dataset_with_no_policies_round_trips_via_serde_default() {
+        // Older/simpler JSON (predating this field) must still deserialize:
+        // `policies` is #[serde(default)] precisely so a Dataset with no
+        // `policies` key at all comes back as an empty Vec, not an error.
+        let json = serde_json::json!({
+            "id": "ds-1",
+            "properties": {},
+            "distributions": [],
+        });
+        let dataset: Dataset = serde_json::from_value(json).expect("deserializes");
+        assert!(dataset.policies.is_empty());
+
+        let round_tripped: Dataset =
+            serde_json::from_str(&serde_json::to_string(&dataset).unwrap()).unwrap();
+        assert_eq!(round_tripped, dataset);
+    }
+
+    #[test]
+    fn policy_with_full_shape_round_trips_through_json() {
+        let policy = Policy {
+            id: Some("policy-1".into()),
+            kind: PolicyKind::Offer,
+            assigner: Some("did:example:provider".into()),
+            assignee: Some("did:example:consumer".into()),
+            permissions: vec![Rule {
+                action: "use".into(),
+                constraints: vec![Constraint {
+                    left_operand: "odrl:dateTime".into(),
+                    operator: "lteq".into(),
+                    right_operand: "2027-01-01T00:00:00Z".into(),
+                }],
+            }],
+            prohibitions: vec![Rule {
+                action: "distribute".into(),
+                constraints: Vec::new(),
+            }],
+            obligations: Vec::new(),
+        };
+
+        let json = serde_json::to_string(&policy).expect("serializes");
+        let round_tripped: Policy = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(round_tripped, policy);
+
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["kind"], "Offer");
+        assert_eq!(value["id"], "policy-1");
+        assert_eq!(value["permissions"][0]["action"], "use");
+        assert_eq!(
+            value["permissions"][0]["constraints"][0]["right_operand"],
+            "2027-01-01T00:00:00Z"
+        );
+        // obligations was empty - #[serde(default)] means it's fine either
+        // way whether present-and-empty or omitted, but our derive always
+        // emits it (no skip_serializing_if), so assert it's there and empty.
+        assert!(value["obligations"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dataset_with_policies_round_trips() {
+        let dataset = Dataset {
+            id: "ds-1".into(),
+            properties: BTreeMap::new(),
+            distributions: Vec::new(),
+            policies: vec![Policy {
+                id: None,
+                kind: PolicyKind::Offer,
+                assigner: None,
+                assignee: None,
+                permissions: vec![Rule {
+                    action: "use".into(),
+                    constraints: Vec::new(),
+                }],
+                prohibitions: Vec::new(),
+                obligations: Vec::new(),
+            }],
+        };
+
+        let round_tripped: Dataset =
+            serde_json::from_str(&serde_json::to_string(&dataset).unwrap()).unwrap();
+        assert_eq!(round_tripped, dataset);
+        assert_eq!(round_tripped.policies[0].kind, PolicyKind::Offer);
     }
 }

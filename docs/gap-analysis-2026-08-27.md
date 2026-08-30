@@ -175,6 +175,19 @@ based on policy (e.g. not listing a dataset a given internal caller isn't entitl
 is a genuinely open design question, not answered by this document — flag it for a
 real decision, don't guess at one here.
 
+**Status: implemented (preservation half only).** `catalog-core` now has a real
+`Policy`/`Rule`/`Constraint` model (`Dataset.policies: Vec<Policy>`); `crawler` parses
+it from a crawled participant's `odrl:hasPolicy` triples; `rdf-store` preserves it as
+real `odrl:` triples in the Oxigraph-backed semantic cache (write and read paths); the
+management API's `hasPolicy` field is populated from that preserved data instead of
+always being an empty array. Only *atomic* ODRL constraints (`leftOperand`/`operator`/
+`rightOperand`) are modeled — nested logical-constraint groups (`odrl:and`/`odrl:or`/
+`odrl:xone`) are a deliberate, known scope cut; a crawled constraint shaped as one of
+those is skipped (with a `tracing::warn!`), not silently dropped along with the rest of
+its policy, and not a crash. The *filtering* question this section raised — whether the
+broker should hide a dataset from a caller not entitled under its policy — remains
+open and unimplemented; nothing filters on policy content today.
+
 ### 3.5 Test-fixture impact: the DCP-gated crawl test
 
 `crates/crawler/tests/multi_participant_crawl.rs`'s "gated participant" (Instance P)
